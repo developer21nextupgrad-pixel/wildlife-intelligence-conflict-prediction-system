@@ -271,7 +271,7 @@ export default function App() {
         </div>
         <div className="text-center">
           <div className="text-xs uppercase font-mono tracking-widest text-emerald-400 font-bold">
-            FOREST DEPARTMENT • GOVT. OF KARNATAKA
+            FOREST DEPARTMENT • GOVT. OF Uttar Pradesh • INDIA
           </div>
           <h2 className="text-base font-bold font-mono tracking-wider text-white mt-1">
             WICPS COMMAND PLATFORM
