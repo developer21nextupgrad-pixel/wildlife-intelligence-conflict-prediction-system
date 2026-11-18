@@ -1,0 +1,6 @@
+{
+  "name": "Wildlife Intelligence & Conflict Prediction System (WICPS)",
+  "description": "Government-grade GIS intelligence and human-wildlife conflict prediction platform for Forest Departments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

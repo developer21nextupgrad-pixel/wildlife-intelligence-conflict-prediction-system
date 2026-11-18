@@ -1,0 +1,48 @@
+services:
+  postgis:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: wicps-postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wicps
+      POSTGRES_USER: wicps_user
+      POSTGRES_PASSWORD: wicps_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - wicps_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U wicps_user -d wicps"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wicps-fastapi
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+psycopg://wicps_user:wicps_dev_password@postgis:5432/wicps
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      CORS_ORIGIN_REGEX: "^https://(ais-[a-z0-9-]+\\.[a-z0-9.-]+\\.run\\.app|[a-z0-9-]+\\.scf\\.usercontent\\.goog)$$"
+      RATE_LIMIT_REQUESTS: "180"
+      RATE_LIMIT_WINDOW_SECONDS: "60"
+      AUTO_SEED_DEMO_DATA: "true"
+      EXPOSE_TELEMETRY_COORDS: "false"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  wicps_pgdata:
