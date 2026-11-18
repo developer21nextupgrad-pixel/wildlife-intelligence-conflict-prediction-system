@@ -628,7 +628,7 @@ export const INITIAL_STAFF: UserStaff[] = [
     role: 'Wildlife Biologist',
     assignedBeat: 'Veterinary Hospital & Capture Unit',
     contactNumber: '+91 94483 44012',
-    email: 'anjali.rao@karnatakawildlife.org',
+    email: 'anjali.rao@upwildlife.org',
     status: 'On Duty',
     avatarInitials: 'AR',
   },

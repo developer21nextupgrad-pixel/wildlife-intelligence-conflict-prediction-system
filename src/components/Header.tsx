@@ -106,7 +106,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-bold font-mono truncate">
-                Forest Dept • Karnataka
+                Forest Dept • Uttar Pradesh • India
               </span>
               <span className="hidden xl:inline-block bg-slate-900 text-slate-300 border border-slate-700/80 text-[9px] px-1.5 py-0.2 rounded font-mono shrink-0">
                 GIS COMMAND • PROTOTYPE
