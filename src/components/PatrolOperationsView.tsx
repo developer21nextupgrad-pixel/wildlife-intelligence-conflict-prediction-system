@@ -10,8 +10,45 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
+import { DIVISION_OPTIONS, validatePatrolInput } from '../utils/wicpsFilters';
 
 const DUTY_APPROVER_LABEL = 'Duty Officer (Command Desk)';
+
+interface PatrolFormState {
+  teamName: string;
+  leadOfficer: string;
+  targetArea: string;
+  sector: string;
+  district: string;
+  priority: PatrolOperation['priority'] | '';
+  status: PatrolOperation['status'] | '';
+  scheduledWindow: string;
+  activePersonnel: string;
+  equipmentText: string;
+  riskRationale: string;
+  approvedBy: string;
+  latitude: string;
+  longitude: string;
+}
+
+function buildEmptyPatrolForm(): PatrolFormState {
+  return {
+    teamName: '',
+    leadOfficer: '',
+    targetArea: '',
+    sector: '',
+    district: '',
+    priority: '',
+    status: '',
+    scheduledWindow: '',
+    activePersonnel: '',
+    equipmentText: '',
+    riskRationale: '',
+    approvedBy: '',
+    latitude: '',
+    longitude: '',
+  };
+}
 
 interface PatrolOperationsViewProps {
   patrols: PatrolOperation[];
@@ -44,20 +81,8 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
   const [updatingPatrolId, setUpdatingPatrolId] = useState<string | null>(null);
 
   // New Patrol Form State
-  const [formData, setFormData] = useState({
-    teamName: 'QRT Beta — Secondary Intercept Unit',
-    leadOfficer: 'Suresh Kumar, SFS (RFO)',
-    targetArea: 'Mangala - Gundlupet Agricultural Buffer',
-    sector: 'Gundlupet Buffer Beat 02',
-    priority: 'High' as PatrolOperation['priority'],
-    status: 'Scheduled' as PatrolOperation['status'],
-    scheduledWindow: '20:00 - 04:00 IST (Night Shift)',
-    activePersonnel: 4,
-    equipment: ['Thermal Monocular', 'Searchlight Array', 'Acoustic Siren', 'First Aid Trauma Kit'],
-    riskRationale: 'Preemptive night surveillance following camera trap leopard triggers',
-    approvedBy: DUTY_APPROVER_LABEL,
-    coordinates: [11.6892, 76.6412] as [number, number],
-  });
+  const [formData, setFormData] = useState<PatrolFormState>(buildEmptyPatrolForm);
+  const [formFieldErrors, setFormFieldErrors] = useState<Record<string, string>>({});
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -113,15 +138,81 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
     },
   ];
 
+  const handleOpenPlanModal = () => {
+    setFormData(buildEmptyPatrolForm());
+    setFormFieldErrors({});
+    setModalError(null);
+    setIsPlanModalOpen(true);
+  };
+
+  const handleClosePlanModal = () => {
+    if (isSubmitting) return;
+    setIsPlanModalOpen(false);
+    setFormData(buildEmptyPatrolForm());
+    setFormFieldErrors({});
+    setModalError(null);
+  };
+
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
+    const personnelNum = Number.parseInt(formData.activePersonnel, 10);
+    const latNum = Number.parseFloat(formData.latitude);
+    const lngNum = Number.parseFloat(formData.longitude);
+
+    const validationErrors = validatePatrolInput({
+      teamName: formData.teamName,
+      leadOfficer: formData.leadOfficer,
+      targetArea: formData.targetArea,
+      sector: formData.sector,
+      district: formData.district,
+      priority: formData.priority,
+      status: formData.status,
+      scheduledWindow: formData.scheduledWindow,
+      activePersonnel: personnelNum,
+      riskRationale: formData.riskRationale,
+      approvedBy: formData.approvedBy,
+      latitude: latNum,
+      longitude: lngNum,
+    });
+
+    setFormFieldErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      setModalError('Please correct the highlighted fields before scheduling the patrol.');
+      return;
+    }
+
+    const equipment = formData.equipmentText
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    const payload: Omit<PatrolOperation, 'id' | 'patrolCode'> = {
+      teamName: formData.teamName.trim(),
+      leadOfficer: formData.leadOfficer.trim(),
+      targetArea: formData.targetArea.trim(),
+      sector: formData.sector.trim(),
+      district: formData.district.trim(),
+      priority: formData.priority as PatrolOperation['priority'],
+      status: formData.status as PatrolOperation['status'],
+      scheduledWindow: formData.scheduledWindow.trim(),
+      activePersonnel: personnelNum,
+      equipment,
+      riskRationale: formData.riskRationale.trim(),
+      approvedBy: formData.approvedBy.trim(),
+      coordinates: [latNum, lngNum],
+    };
+
     setIsSubmitting(true);
     setModalError(null);
     setActionError(null);
     try {
-      await onCreatePatrol(formData);
+      await onCreatePatrol(payload);
       setIsSubmitting(false);
       setIsPlanModalOpen(false);
+      setFormData(buildEmptyPatrolForm());
+      setFormFieldErrors({});
       setToastMessage('Patrol schedule persisted to PostgreSQL/PostGIS database.');
       setTimeout(() => setToastMessage(null), 4000);
     } catch (err) {
@@ -215,10 +306,8 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
             <span>View Sectors on GIS Map</span>
           </button>
           <button
-            onClick={() => {
-              setModalError(null);
-              setIsPlanModalOpen(true);
-            }}
+            type="button"
+            onClick={handleOpenPlanModal}
             className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold px-3.5 py-2 rounded-lg shadow-sm transition active:scale-95"
           >
             <Plus className="w-4 h-4" />
@@ -702,24 +791,38 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
 
       {/* MODAL: PLAN NEW PATROL */}
       {isPlanModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs overflow-y-auto">
-          <div className="bg-slate-900 rounded-2xl border border-slate-800 w-full max-w-xl overflow-hidden shadow-2xl animate-in fade-in">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="patrol-form-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs overflow-y-auto"
+        >
+          <div className="bg-slate-900 rounded-2xl border border-slate-800 w-full max-w-2xl my-8 overflow-hidden shadow-2xl animate-in fade-in">
             <div className="bg-slate-950 px-6 py-4 border-b border-slate-800 flex items-center justify-between text-white">
               <div>
                 <span className="text-emerald-400 font-mono text-xs uppercase font-bold">
                   Field Operations • Directive Form P-01
                 </span>
-                <h3 className="text-base font-bold">Schedule New Patrol Squad</h3>
+                <h3 id="patrol-form-modal-title" className="text-base font-bold">
+                  Schedule New Patrol Squad
+                </h3>
               </div>
               <button
-                onClick={() => setIsPlanModalOpen(false)}
+                type="button"
+                disabled={isSubmitting}
+                onClick={handleClosePlanModal}
+                aria-label="Close patrol form"
                 className="text-slate-400 hover:text-white"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateSubmit} className="p-6 space-y-4 text-xs text-slate-300">
+            <form
+              onSubmit={handleCreateSubmit}
+              noValidate
+              className="p-6 space-y-4 text-xs text-slate-300 max-h-[80vh] overflow-y-auto"
+            >
               {modalError && (
                 <div
                   role="alert"
@@ -731,125 +834,340 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="patrol-team-input" className="block font-bold text-slate-200 mb-1">
                     Squad Designation *
                   </label>
                   <input
+                    id="patrol-team-input"
                     type="text"
+                    placeholder="e.g. QRT Beta — Secondary Intercept Unit"
                     value={formData.teamName}
                     onChange={(e) => setFormData({ ...formData, teamName: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.teamName ? 'border-red-500' : 'border-slate-800'
+                    }`}
                     required
                   />
+                  {formFieldErrors.teamName && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.teamName}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">Lead Officer *</label>
+                  <label htmlFor="patrol-officer-input" className="block font-bold text-slate-200 mb-1">
+                    Lead Officer *
+                  </label>
                   <input
+                    id="patrol-officer-input"
                     type="text"
+                    placeholder="e.g. Suresh Kumar, SFS (RFO)"
                     value={formData.leadOfficer}
                     onChange={(e) => setFormData({ ...formData, leadOfficer: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.leadOfficer ? 'border-red-500' : 'border-slate-800'
+                    }`}
                     required
                   />
+                  {formFieldErrors.leadOfficer && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.leadOfficer}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
-                    Target Sector / Boundary *
+                  <label htmlFor="patrol-target-area-input" className="block font-bold text-slate-200 mb-1">
+                    Target Area / Boundary *
                   </label>
                   <input
+                    id="patrol-target-area-input"
                     type="text"
+                    placeholder="e.g. Mangala - Gundlupet Agricultural Buffer"
                     value={formData.targetArea}
                     onChange={(e) => setFormData({ ...formData, targetArea: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.targetArea ? 'border-red-500' : 'border-slate-800'
+                    }`}
                     required
                   />
+                  {formFieldErrors.targetArea && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.targetArea}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
-                    Priority Classification
+                  <label htmlFor="patrol-sector-input" className="block font-bold text-slate-200 mb-1">
+                    Patrol Sector / Beat *
+                  </label>
+                  <input
+                    id="patrol-sector-input"
+                    type="text"
+                    placeholder="e.g. Gundlupet Buffer Beat 02"
+                    value={formData.sector}
+                    onChange={(e) => setFormData({ ...formData, sector: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.sector ? 'border-red-500' : 'border-slate-800'
+                    }`}
+                    required
+                  />
+                  {formFieldErrors.sector && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.sector}
+                    </span>
+                  )}
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label htmlFor="patrol-district-input" className="block font-bold text-slate-200 mb-1">
+                    District / Wildlife Division *
+                  </label>
+                  <input
+                    id="patrol-district-input"
+                    type="text"
+                    list="patrol-division-suggestions"
+                    placeholder="e.g. Bandipur Division"
+                    value={formData.district}
+                    onChange={(e) => setFormData({ ...formData, district: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.district ? 'border-red-500' : 'border-slate-800'
+                    }`}
+                    required
+                  />
+                  <datalist id="patrol-division-suggestions">
+                    {DIVISION_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id} />
+                    ))}
+                  </datalist>
+                  {formFieldErrors.district && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.district}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="patrol-priority-select" className="block font-bold text-slate-200 mb-1">
+                    Priority Classification *
                   </label>
                   <select
+                    id="patrol-priority-select"
                     value={formData.priority}
                     onChange={(e) =>
                       setFormData({
                         ...formData,
-                        priority: e.target.value as PatrolOperation['priority'],
+                        priority: e.target.value as PatrolOperation['priority'] | '',
                       })
                     }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.priority ? 'border-red-500' : 'border-slate-800'
+                    }`}
                   >
+                    <option value="">Select priority level...</option>
                     <option value="Critical">Critical (Immediate Interception)</option>
                     <option value="High">High (High-Vulnerability Buffer)</option>
                     <option value="Medium">Medium (Routine Perimeter)</option>
                     <option value="Low">Low (Biological Sweep)</option>
                   </select>
+                  {formFieldErrors.priority && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.priority}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">Operating Window</label>
+                  <label htmlFor="patrol-status-select" className="block font-bold text-slate-200 mb-1">
+                    Initial Status *
+                  </label>
+                  <select
+                    id="patrol-status-select"
+                    value={formData.status}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        status: e.target.value as PatrolOperation['status'] | '',
+                      })
+                    }
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.status ? 'border-red-500' : 'border-slate-800'
+                    }`}
+                  >
+                    <option value="">Select initial status...</option>
+                    <option value="Scheduled">Scheduled</option>
+                    <option value="In Progress">In Progress</option>
+                    <option value="On Station">On Station</option>
+                    <option value="Completed">Completed</option>
+                  </select>
+                  {formFieldErrors.status && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.status}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="patrol-window-input" className="block font-bold text-slate-200 mb-1">
+                    Operating Window *
+                  </label>
                   <input
+                    id="patrol-window-input"
                     type="text"
+                    placeholder="e.g. 20:00 - 04:00 IST (Night Shift)"
                     value={formData.scheduledWindow}
                     onChange={(e) =>
                       setFormData({ ...formData, scheduledWindow: e.target.value })
                     }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 font-mono text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.scheduledWindow ? 'border-red-500' : 'border-slate-800'
+                    }`}
                   />
+                  {formFieldErrors.scheduledWindow && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.scheduledWindow}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
-                    Team Strength (Personnel)
+                  <label htmlFor="patrol-personnel-input" className="block font-bold text-slate-200 mb-1">
+                    Team Strength (Personnel) *
                   </label>
                   <input
+                    id="patrol-personnel-input"
                     type="number"
-                    min="2"
-                    max="15"
+                    min="1"
+                    max="200"
+                    placeholder="e.g. 4"
                     value={formData.activePersonnel}
                     onChange={(e) =>
                       setFormData({
                         ...formData,
-                        activePersonnel: parseInt(e.target.value, 10) || 4,
+                        activePersonnel: e.target.value,
                       })
                     }
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-white focus:outline-hidden focus:border-emerald-500"
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 font-mono text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.activePersonnel ? 'border-red-500' : 'border-slate-800'
+                    }`}
                   />
+                  {formFieldErrors.activePersonnel && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.activePersonnel}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="patrol-lat-input" className="block font-bold text-slate-200 mb-1">
+                    Latitude (WGS84) *
+                  </label>
+                  <input
+                    id="patrol-lat-input"
+                    type="number"
+                    step="0.0001"
+                    placeholder="e.g. 11.6892"
+                    value={formData.latitude}
+                    onChange={(e) => setFormData({ ...formData, latitude: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 font-mono text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.latitude ? 'border-red-500' : 'border-slate-800'
+                    }`}
+                  />
+                  {formFieldErrors.latitude && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.latitude}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="patrol-lng-input" className="block font-bold text-slate-200 mb-1">
+                    Longitude (WGS84) *
+                  </label>
+                  <input
+                    id="patrol-lng-input"
+                    type="number"
+                    step="0.0001"
+                    placeholder="e.g. 76.6412"
+                    value={formData.longitude}
+                    onChange={(e) => setFormData({ ...formData, longitude: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2.5 font-mono text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                      formFieldErrors.longitude ? 'border-red-500' : 'border-slate-800'
+                    }`}
+                  />
+                  {formFieldErrors.longitude && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formFieldErrors.longitude}
+                    </span>
+                  )}
                 </div>
               </div>
 
               <div>
-                <label className="block font-bold text-slate-200 mb-1">
-                  Deployment Rationale & Directive *
+                <label htmlFor="patrol-equipment-input" className="block font-bold text-slate-200 mb-1">
+                  Assigned Equipment (Comma-separated, Optional)
                 </label>
-                <textarea
-                  rows={2}
-                  value={formData.riskRationale}
-                  onChange={(e) => setFormData({ ...formData, riskRationale: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
-                  required
+                <input
+                  id="patrol-equipment-input"
+                  type="text"
+                  placeholder="e.g. Thermal Monocular, Searchlight Array, Acoustic Siren"
+                  value={formData.equipmentText}
+                  onChange={(e) => setFormData({ ...formData, equipmentText: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500"
                 />
               </div>
 
               <div>
-                <label className="block font-bold text-slate-200 mb-1">
+                <label htmlFor="patrol-rationale-textarea" className="block font-bold text-slate-200 mb-1">
+                  Deployment Rationale & Directive *
+                </label>
+                <textarea
+                  id="patrol-rationale-textarea"
+                  rows={2}
+                  placeholder="Describe tactical objective and wildlife movement risk..."
+                  value={formData.riskRationale}
+                  onChange={(e) => setFormData({ ...formData, riskRationale: e.target.value })}
+                  className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                    formFieldErrors.riskRationale ? 'border-red-500' : 'border-slate-800'
+                  }`}
+                  required
+                />
+                {formFieldErrors.riskRationale && (
+                  <span className="text-red-400 text-[11px] mt-0.5 block">
+                    {formFieldErrors.riskRationale}
+                  </span>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="patrol-approved-by-input" className="block font-bold text-slate-200 mb-1">
                   Authorizing Officer *
                 </label>
                 <input
+                  id="patrol-approved-by-input"
                   type="text"
+                  placeholder="e.g. Duty Officer (Command Desk)"
                   value={formData.approvedBy}
                   onChange={(e) => setFormData({ ...formData, approvedBy: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-hidden focus:border-emerald-500"
+                  className={`w-full bg-slate-950 border rounded-lg p-2.5 text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 ${
+                    formFieldErrors.approvedBy ? 'border-red-500' : 'border-slate-800'
+                  }`}
                   required
                 />
+                {formFieldErrors.approvedBy && (
+                  <span className="text-red-400 text-[11px] mt-0.5 block">
+                    {formFieldErrors.approvedBy}
+                  </span>
+                )}
               </div>
 
               <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setIsPlanModalOpen(false)}
+                  disabled={isSubmitting}
+                  onClick={handleClosePlanModal}
                   className="px-4 py-2 border border-slate-700 rounded-lg text-slate-300 hover:bg-slate-800"
                 >
                   Cancel

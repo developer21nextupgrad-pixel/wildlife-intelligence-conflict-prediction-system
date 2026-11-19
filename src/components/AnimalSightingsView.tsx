@@ -17,6 +17,7 @@ import {
   Maximize2,
   Clock,
   User,
+  Trash2,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
 import {
@@ -63,7 +64,7 @@ const BEHAVIOR_OPTIONS: AnimalSighting['behavior'][] = [
 ];
 
 interface SightingFormState {
-  species: SpeciesType;
+  species: SpeciesType | '';
   timestamp: string;
   latitude: string;
   longitude: string;
@@ -71,9 +72,9 @@ interface SightingFormState {
   district: string;
   forestRange: string;
   herdSize: string;
-  movementDirection: AnimalSighting['movementDirection'];
-  bearingDegrees: number;
-  behavior: AnimalSighting['behavior'];
+  movementDirection: AnimalSighting['movementDirection'] | '';
+  bearingDegrees: number | null;
+  behavior: AnimalSighting['behavior'] | '';
   juvenilesPresent: boolean;
   observationDetails: string;
   observerName: string;
@@ -116,22 +117,22 @@ function formatReadableTimestamp(value?: string): string {
 
 function buildDefaultCreateForm(): SightingFormState {
   return {
-    species: 'Asian Elephant',
-    timestamp: toDatetimeLocalValue(),
-    latitude: '11.668',
-    longitude: '76.612',
+    species: '',
+    timestamp: '',
+    latitude: '',
+    longitude: '',
     locationName: '',
-    district: 'Bandipur Division',
-    forestRange: 'Hediyala Range',
-    herdSize: '4',
-    movementDirection: 'North-East',
-    bearingDegrees: getBearingForDirection('North-East'),
-    behavior: 'Foraging',
+    district: '',
+    forestRange: '',
+    herdSize: '',
+    movementDirection: '',
+    bearingDegrees: null,
+    behavior: '',
     juvenilesPresent: false,
     observationDetails: '',
-    observerName: 'Beat Guard R. Kumar',
-    observerRole: 'Forest Guard',
-    verifiedByForestGuard: true,
+    observerName: '',
+    observerRole: '',
+    verifiedByForestGuard: false,
     photoUrl: '',
   };
 }
@@ -169,6 +170,7 @@ interface AnimalSightingsViewProps {
     id: string,
     sighting: Partial<Omit<AnimalSighting, 'id' | 'sightingCode'>>
   ) => Promise<void>;
+  onDeleteSighting?: (id: string) => Promise<void>;
   isApiLoading?: boolean;
   apiError?: string | null;
   onRetrySync?: () => void;
@@ -182,6 +184,7 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
   onResetGlobalFilters,
   onAddSighting,
   onUpdateSighting,
+  onDeleteSighting,
   isApiLoading = false,
   apiError = null,
   onRetrySync,
@@ -198,6 +201,11 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
+  // Delete confirmation modal state
+  const [sightingPendingDelete, setSightingPendingDelete] = useState<AnimalSighting | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isDeletingSighting, setIsDeletingSighting] = useState(false);
+
   // View Details & Lightbox state
   const [viewingSighting, setViewingSighting] = useState<AnimalSighting | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; caption: string } | null>(null);
@@ -213,16 +221,20 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
       if (e.key !== 'Escape') return;
       if (lightboxImage) {
         setLightboxImage(null);
+      } else if (sightingPendingDelete && !isDeletingSighting) {
+        setSightingPendingDelete(null);
+        setDeleteError(null);
       } else if (isModalOpen && !isSubmitting) {
         setIsModalOpen(false);
         setEditingSighting(null);
+        setFormData(buildDefaultCreateForm());
       } else if (viewingSighting) {
         setViewingSighting(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [lightboxImage, isModalOpen, isSubmitting, viewingSighting]);
+  }, [lightboxImage, sightingPendingDelete, isDeletingSighting, isModalOpen, isSubmitting, viewingSighting]);
 
   const showSuccessBanner = (message: string) => {
     setActionSuccess(message);
@@ -263,15 +275,39 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
     if (isSubmitting) return;
     setIsModalOpen(false);
     setEditingSighting(null);
+    setFormData(buildDefaultCreateForm());
     setFormErrors({});
     setFormError(null);
   };
 
-  const handleDirectionChange = (dir: AnimalSighting['movementDirection']) => {
+  const handleConfirmDeleteSighting = async () => {
+    if (!sightingPendingDelete || isDeletingSighting || !onDeleteSighting) return;
+    setIsDeletingSighting(true);
+    setDeleteError(null);
+    const targetId = sightingPendingDelete.id;
+    const targetCode = sightingPendingDelete.sightingCode;
+    const targetSpecies = sightingPendingDelete.species;
+    try {
+      await onDeleteSighting(targetId);
+      setSightingPendingDelete(null);
+      if (viewingSighting?.id === targetId) {
+        setViewingSighting(null);
+      }
+      showSuccessBanner(`Sighting ${targetCode} (${targetSpecies}) permanently deleted.`);
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error ? err.message : 'Failed to delete sighting from backend database.'
+      );
+    } finally {
+      setIsDeletingSighting(false);
+    }
+  };
+
+  const handleDirectionChange = (dir: AnimalSighting['movementDirection'] | '') => {
     setFormData((prev) => ({
       ...prev,
       movementDirection: dir,
-      bearingDegrees: getBearingForDirection(dir),
+      bearingDegrees: dir ? getBearingForDirection(dir) : null,
     }));
   };
 
@@ -284,6 +320,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
     const lngNum = Number.parseFloat(formData.longitude);
 
     const errs = validateSightingInput({
+      species: formData.species,
+      timestamp: formData.timestamp,
+      movementDirection: formData.movementDirection,
+      behavior: formData.behavior,
       locationName: formData.locationName,
       observationDetails: formData.observationDetails,
       herdSize: herdSizeNum,
@@ -306,8 +346,9 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
       return;
     }
 
+    const direction = formData.movementDirection as AnimalSighting['movementDirection'];
     const payload: Omit<AnimalSighting, 'id' | 'sightingCode'> = {
-      species: formData.species,
+      species: formData.species as SpeciesType,
       timestamp: fromDatetimeLocalValue(formData.timestamp),
       latitude: latNum,
       longitude: lngNum,
@@ -315,9 +356,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
       district: formData.district.trim(),
       forestRange: formData.forestRange.trim(),
       herdSize: herdSizeNum,
-      movementDirection: formData.movementDirection,
-      bearingDegrees: formData.bearingDegrees,
-      behavior: formData.behavior,
+      movementDirection: direction,
+      bearingDegrees:
+        formData.bearingDegrees ?? getBearingForDirection(direction),
+      behavior: formData.behavior as AnimalSighting['behavior'],
       juvenilesPresent: formData.juvenilesPresent,
       observationDetails: formData.observationDetails.trim(),
       observerName: formData.observerName.trim(),
@@ -338,6 +380,7 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
         const updatedCode = editingSighting.sightingCode;
         setIsModalOpen(false);
         setEditingSighting(null);
+        setFormData(buildDefaultCreateForm());
         setFormErrors({});
         showSuccessBanner(`Sighting ${updatedCode} (${payload.species}) updated in PostgreSQL database.`);
       } else {
@@ -361,9 +404,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
   const isGloballyFiltered =
     totalUnfilteredCount !== undefined && sightings.length < totalUnfilteredCount;
 
-  const availableForestRanges = FOREST_RANGE_PRESETS.includes(formData.forestRange)
-    ? FOREST_RANGE_PRESETS
-    : [formData.forestRange, ...FOREST_RANGE_PRESETS];
+  const availableForestRanges =
+    !formData.forestRange || FOREST_RANGE_PRESETS.includes(formData.forestRange)
+      ? FOREST_RANGE_PRESETS
+      : [formData.forestRange, ...FOREST_RANGE_PRESETS];
 
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto">
@@ -589,7 +633,7 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     </span>
                   </div>
 
-                  <div className="flex items-center justify-end gap-2">
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => setViewingSighting(sighting)}
@@ -609,6 +653,21 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                       >
                         <Pencil className="w-3.5 h-3.5" />
                         <span>Edit</span>
+                      </button>
+                    )}
+
+                    {onDeleteSighting && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setSightingPendingDelete(sighting);
+                        }}
+                        aria-label={`Delete sighting ${sighting.sightingCode}`}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-red-900/60 bg-slate-950 hover:bg-red-950/70 text-red-300 text-xs font-semibold transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
                       </button>
                     )}
                   </div>
@@ -967,16 +1026,24 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     id="sighting-species-select"
                     value={formData.species}
                     onChange={(e) =>
-                      setFormData({ ...formData, species: e.target.value as SpeciesType })
+                      setFormData({ ...formData, species: e.target.value as SpeciesType | '' })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                      formErrors.species ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select wildlife species...</option>
                     {SPECIES_OPTIONS.map((sp) => (
                       <option key={sp} value={sp}>
                         {sp}
                       </option>
                     ))}
                   </select>
+                  {formErrors.species && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.species}
+                    </span>
+                  )}
                 </div>
 
                 <div>
@@ -988,9 +1055,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     type="number"
                     min="1"
                     max="500"
+                    placeholder="e.g. 4"
                     value={formData.herdSize}
                     onChange={(e) => setFormData({ ...formData, herdSize: e.target.value })}
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
                       formErrors.herdSize ? 'border-red-500' : 'border-slate-700'
                     }`}
                     required
@@ -1011,9 +1079,16 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     type="datetime-local"
                     value={formData.timestamp}
                     onChange={(e) => setFormData({ ...formData, timestamp: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                      formErrors.timestamp ? 'border-red-500' : 'border-slate-700'
+                    }`}
                     required
                   />
+                  {formErrors.timestamp && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.timestamp}
+                    </span>
+                  )}
                 </div>
 
                 <div>
@@ -1026,38 +1101,57 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     onChange={(e) =>
                       setFormData({
                         ...formData,
-                        behavior: e.target.value as AnimalSighting['behavior'],
+                        behavior: e.target.value as AnimalSighting['behavior'] | '',
                       })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                      formErrors.behavior ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select observed behavior...</option>
                     {BEHAVIOR_OPTIONS.map((beh) => (
                       <option key={beh} value={beh}>
                         {beh}
                       </option>
                     ))}
                   </select>
+                  {formErrors.behavior && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.behavior}
+                    </span>
+                  )}
                 </div>
 
                 <div>
                   <label htmlFor="sighting-direction-select" className="block font-bold text-slate-200 mb-1">
-                    Movement Direction (Bearing: {formData.bearingDegrees}°)
+                    Movement Direction * (Bearing:{' '}
+                    {formData.bearingDegrees !== null ? `${formData.bearingDegrees}°` : '—'})
                   </label>
                   <select
                     id="sighting-direction-select"
                     aria-label="Movement Direction"
                     value={formData.movementDirection}
                     onChange={(e) =>
-                      handleDirectionChange(e.target.value as AnimalSighting['movementDirection'])
+                      handleDirectionChange(
+                        e.target.value as AnimalSighting['movementDirection'] | ''
+                      )
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                      formErrors.movementDirection ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select movement direction...</option>
                     {DIRECTION_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>
                     ))}
                   </select>
+                  {formErrors.movementDirection && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.movementDirection}
+                    </span>
+                  )}
                 </div>
 
                 <div>
@@ -1073,6 +1167,7 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                       formErrors.forestRange ? 'border-red-500' : 'border-slate-700'
                     }`}
                   >
+                    <option value="">Select forest range...</option>
                     {availableForestRanges.map((rng) => (
                       <option key={rng} value={rng}>
                         {rng}
@@ -1122,9 +1217,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     aria-label="Sighting Latitude"
                     type="number"
                     step="0.0001"
+                    placeholder="e.g. 11.6680"
                     value={formData.latitude}
                     onChange={(e) => setFormData({ ...formData, latitude: e.target.value })}
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
                       formErrors.latitude ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -1144,9 +1240,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     aria-label="Sighting Longitude"
                     type="number"
                     step="0.0001"
+                    placeholder="e.g. 76.6120"
                     value={formData.longitude}
                     onChange={(e) => setFormData({ ...formData, longitude: e.target.value })}
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
                       formErrors.longitude ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -1165,9 +1262,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     id="sighting-observer-name-input"
                     aria-label="Observer Name"
                     type="text"
+                    placeholder="e.g. Beat Guard R. Kumar"
                     value={formData.observerName}
                     onChange={(e) => setFormData({ ...formData, observerName: e.target.value })}
-                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
                       formErrors.observerName ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -1186,9 +1284,10 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                     id="sighting-observer-role-input"
                     aria-label="Observer Role"
                     type="text"
+                    placeholder="e.g. Forest Guard"
                     value={formData.observerRole}
                     onChange={(e) => setFormData({ ...formData, observerRole: e.target.value })}
-                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-sky-500 focus:outline-hidden ${
                       formErrors.observerRole ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -1351,6 +1450,72 @@ export const AnimalSightingsView: React.FC<AnimalSightingsViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* DELETE SIGHTING CONFIRMATION MODAL */}
+      {sightingPendingDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-sighting-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs"
+        >
+          <div className="bg-slate-900 rounded-2xl shadow-2xl border border-red-800/70 w-full max-w-md p-6 space-y-4 animate-in fade-in">
+            <div className="border-b border-slate-800 pb-3">
+              <span className="text-xs font-mono font-bold text-red-400 uppercase">
+                Permanent Database Action
+              </span>
+              <h3 id="delete-sighting-dialog-title" className="text-base font-bold text-white mt-1">
+                Confirm Sighting Deletion
+              </h3>
+            </div>
+
+            {deleteError && (
+              <div
+                role="alert"
+                className="bg-red-950/80 border border-red-700/70 text-red-200 px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{deleteError}</span>
+              </div>
+            )}
+
+            <div className="text-xs text-slate-300 space-y-2">
+              <p>
+                Are you sure you want to permanently delete this animal sighting record from PostgreSQL? This action cannot be undone.
+              </p>
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1">
+                <div className="font-bold text-white">
+                  {sightingPendingDelete.sightingCode} — {sightingPendingDelete.species}
+                </div>
+                <div className="text-slate-400">
+                  {sightingPendingDelete.locationName} • {sightingPendingDelete.forestRange}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                disabled={isDeletingSighting}
+                onClick={() => {
+                  setSightingPendingDelete(null);
+                  setDeleteError(null);
+                }}
+                className="px-4 py-2 border border-slate-700 rounded-lg text-slate-300 font-semibold text-xs hover:bg-slate-800 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingSighting}
+                onClick={handleConfirmDeleteSighting}
+                className="px-5 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold transition shadow-sm disabled:opacity-60"
+              >
+                {isDeletingSighting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

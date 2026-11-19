@@ -18,7 +18,51 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
-import { validateIncidentInput } from '../utils/wicpsFilters';
+import { DIVISION_OPTIONS, validateIncidentInput } from '../utils/wicpsFilters';
+
+interface IncidentFormState {
+  species: SpeciesType | '';
+  dateTime: string;
+  latitude: string;
+  longitude: string;
+  village: string;
+  district: string;
+  forestRange: string;
+  incidentType: IncidentType | '';
+  severity: IncidentSeverity | '';
+  humanInjury: Incident['humanInjury'] | '';
+  cropDamageEstimatedAcres: string;
+  cropType: string;
+  description: string;
+  imageUrl: string;
+  status: IncidentStatus | '';
+  reportedBy: string;
+  assignedOfficer: string;
+  actionTaken: string;
+}
+
+function buildEmptyIncidentForm(): IncidentFormState {
+  return {
+    species: '',
+    dateTime: '',
+    latitude: '',
+    longitude: '',
+    village: '',
+    district: '',
+    forestRange: '',
+    incidentType: '',
+    severity: '',
+    humanInjury: '',
+    cropDamageEstimatedAcres: '',
+    cropType: '',
+    description: '',
+    imageUrl: '',
+    status: '',
+    reportedBy: '',
+    assignedOfficer: '',
+    actionTaken: '',
+  };
+}
 
 interface IncidentManagementViewProps {
   incidents: Incident[];
@@ -74,33 +118,20 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Form State
-  const [formData, setFormData] = useState({
-    species: 'Asian Elephant' as SpeciesType,
-    dateTime: new Date().toISOString().slice(0, 16),
-    latitude: 11.664,
-    longitude: 76.622,
-    village: '',
-    district: 'Bandipur Division',
-    forestRange: 'Hediyala Range (Beat 4)',
-    incidentType: 'Crop Depredation' as IncidentType,
-    severity: 'High' as IncidentSeverity,
-    humanInjury: 'None' as Incident['humanInjury'],
-    humanInjuriesCount: 0,
-    livestockLossCount: 0,
-    cropDamageEstimatedAcres: 0,
-    cropType: '',
-    description: '',
-    imageUrl:
-      'https://images.unsplash.com/photo-1557050543-4d5f4e07ef46?auto=format&fit=crop&w=800&q=80',
-    status: 'Reported' as IncidentStatus,
-    reportedBy: 'Village Forest Committee',
-    assignedOfficer: 'RFO Suresh Kumar (QRT-1)',
-    actionTaken: '',
-  });
+  const [formData, setFormData] = useState<IncidentFormState>(buildEmptyIncidentForm);
 
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
+
+  useEffect(() => {
+    if (isModalOpen) {
+      setFormData(buildEmptyIncidentForm());
+      setFormErrors({});
+      setFormError(null);
+      setSubmitSuccess(false);
+    }
+  }, [isModalOpen]);
 
   const handleSearchInputChange = (val: string) => {
     setSearchTerm(val);
@@ -122,12 +153,28 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
   });
 
   const validateForm = () => {
+    const latNum = Number.parseFloat(formData.latitude);
+    const lngNum = Number.parseFloat(formData.longitude);
+    const cropAcresNum =
+      formData.cropDamageEstimatedAcres.trim() === ''
+        ? 0
+        : Number.parseFloat(formData.cropDamageEstimatedAcres);
+
     const errors = validateIncidentInput({
+      species: formData.species,
+      incidentType: formData.incidentType,
+      dateTime: formData.dateTime,
+      severity: formData.severity,
       village: formData.village,
+      district: formData.district,
+      forestRange: formData.forestRange,
+      humanInjury: formData.humanInjury,
+      status: formData.status,
+      reportedBy: formData.reportedBy,
       description: formData.description,
-      latitude: formData.latitude,
-      longitude: formData.longitude,
-      cropDamageEstimatedAcres: formData.cropDamageEstimatedAcres,
+      latitude: latNum,
+      longitude: lngNum,
+      cropDamageEstimatedAcres: cropAcresNum,
     });
     setFormErrors(errors);
     if (Object.keys(errors).length > 0) {
@@ -138,14 +185,53 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
     return true;
   };
 
+  const handleCloseModal = () => {
+    if (isSubmitting) return;
+    setIsModalOpen(false);
+    setFormData(buildEmptyIncidentForm());
+    setFormErrors({});
+    setFormError(null);
+    setSubmitSuccess(false);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!validateForm()) return;
+    if (isSubmitting || !validateForm()) return;
+
+    const latNum = Number.parseFloat(formData.latitude);
+    const lngNum = Number.parseFloat(formData.longitude);
+    const cropAcresNum =
+      formData.cropDamageEstimatedAcres.trim() === ''
+        ? 0
+        : Number.parseFloat(formData.cropDamageEstimatedAcres);
+
+    const payload: Omit<Incident, 'id' | 'incidentCode'> = {
+      species: formData.species as SpeciesType,
+      dateTime: formData.dateTime,
+      latitude: latNum,
+      longitude: lngNum,
+      village: formData.village.trim(),
+      district: formData.district.trim(),
+      forestRange: formData.forestRange.trim(),
+      incidentType: formData.incidentType as IncidentType,
+      severity: formData.severity as IncidentSeverity,
+      humanInjury: formData.humanInjury as Incident['humanInjury'],
+      humanInjuriesCount: 0,
+      livestockLossCount: 0,
+      cropDamageEstimatedAcres: cropAcresNum,
+      cropType: formData.cropType.trim() || undefined,
+      description: formData.description.trim(),
+      imageUrl: formData.imageUrl.trim() || undefined,
+      status: formData.status as IncidentStatus,
+      reportedBy: formData.reportedBy.trim(),
+      assignedOfficer: formData.assignedOfficer.trim() || undefined,
+      actionTaken: formData.actionTaken.trim() || undefined,
+    };
 
     try {
       setIsSubmitting(true);
       setFormError(null);
-      await onAddIncident(formData);
+      await onAddIncident(payload);
       setSubmitSuccess(true);
       setTimeout(() => {
         setIsSubmitting(false);
@@ -153,29 +239,7 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
         setIsModalOpen(false);
         setFormErrors({});
         setFormError(null);
-        setFormData({
-          species: 'Asian Elephant',
-          dateTime: new Date().toISOString().slice(0, 16),
-          latitude: 11.664,
-          longitude: 76.622,
-          village: '',
-          district: 'Bandipur Division',
-          forestRange: 'Hediyala Range (Beat 4)',
-          incidentType: 'Crop Depredation',
-          severity: 'High',
-          humanInjury: 'None',
-          humanInjuriesCount: 0,
-          livestockLossCount: 0,
-          cropDamageEstimatedAcres: 0,
-          cropType: '',
-          description: '',
-          imageUrl:
-            'https://images.unsplash.com/photo-1557050543-4d5f4e07ef46?auto=format&fit=crop&w=800&q=80',
-          status: 'Reported',
-          reportedBy: 'Village Forest Committee',
-          assignedOfficer: 'RFO Suresh Kumar (QRT-1)',
-          actionTaken: '',
-        });
+        setFormData(buildEmptyIncidentForm());
       }, 450);
     } catch (err) {
       setIsSubmitting(false);
@@ -258,8 +322,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
           </button>
           <button
             onClick={() => {
+              setFormData(buildEmptyIncidentForm());
               setFormError(null);
               setFormErrors({});
+              setSubmitSuccess(false);
               setIsModalOpen(true);
             }}
             className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold px-3.5 py-2 rounded-lg shadow-sm transition border border-emerald-400/30"
@@ -511,7 +577,8 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={handleCloseModal}
+                aria-label="Close incident form"
                 className="text-slate-400 hover:text-white p-1 rounded-md transition"
               >
                 <X className="w-5 h-5" />
@@ -519,7 +586,11 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
             </div>
 
             {/* Modal Form */}
-            <form onSubmit={handleSubmit} noValidate className="p-6 space-y-4 text-xs text-slate-300">
+            <form
+              onSubmit={handleSubmit}
+              noValidate
+              className="p-6 space-y-4 text-xs text-slate-300 max-h-[80vh] overflow-y-auto"
+            >
               {formError && (
                 <div
                   role="alert"
@@ -533,14 +604,20 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Species */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">Wildlife Species *</label>
+                  <label htmlFor="incident-species-select" className="block font-bold text-slate-200 mb-1">
+                    Wildlife Species *
+                  </label>
                   <select
+                    id="incident-species-select"
                     value={formData.species}
                     onChange={(e) =>
-                      setFormData({ ...formData, species: e.target.value as SpeciesType })
+                      setFormData({ ...formData, species: e.target.value as SpeciesType | '' })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.species ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select wildlife species...</option>
                     <option value="Asian Elephant">Asian Elephant</option>
                     <option value="Bengal Tiger">Bengal Tiger</option>
                     <option value="Indian Leopard">Indian Leopard</option>
@@ -548,20 +625,29 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                     <option value="Wild Boar">Wild Boar</option>
                     <option value="Gaur">Gaur</option>
                   </select>
+                  {formErrors.species && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.species}
+                    </span>
+                  )}
                 </div>
 
                 {/* Incident Type */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-type-select" className="block font-bold text-slate-200 mb-1">
                     Incident Classification *
                   </label>
                   <select
+                    id="incident-type-select"
                     value={formData.incidentType}
                     onChange={(e) =>
-                      setFormData({ ...formData, incidentType: e.target.value as IncidentType })
+                      setFormData({ ...formData, incidentType: e.target.value as IncidentType | '' })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.incidentType ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select incident classification...</option>
                     <option value="Crop Depredation">Crop Depredation</option>
                     <option value="Human Injury / Attack">Human Injury / Attack</option>
                     <option value="Livestock Predation">Livestock Predation</option>
@@ -569,47 +655,73 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                     <option value="Village Incursion">Village Incursion</option>
                     <option value="Infrastructure Breach">Infrastructure Breach</option>
                   </select>
+                  {formErrors.incidentType && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.incidentType}
+                    </span>
+                  )}
                 </div>
 
                 {/* Date and Time */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-datetime-input" className="block font-bold text-slate-200 mb-1">
                     Date & Time of Occurrence *
                   </label>
                   <input
+                    id="incident-datetime-input"
                     type="datetime-local"
                     value={formData.dateTime}
                     onChange={(e) => setFormData({ ...formData, dateTime: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.dateTime ? 'border-red-500' : 'border-slate-700'
+                    }`}
                     required
                   />
+                  {formErrors.dateTime && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.dateTime}
+                    </span>
+                  )}
                 </div>
 
                 {/* Severity */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-severity-select" className="block font-bold text-slate-200 mb-1">
                     Assessed Severity Level *
                   </label>
                   <select
+                    id="incident-severity-select"
                     value={formData.severity}
                     onChange={(e) =>
-                      setFormData({ ...formData, severity: e.target.value as IncidentSeverity })
+                      setFormData({
+                        ...formData,
+                        severity: e.target.value as IncidentSeverity | '',
+                      })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.severity ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select severity level...</option>
                     <option value="Critical">Critical (Immediate QRT Threat)</option>
                     <option value="High">High (High Damage / Nearby)</option>
                     <option value="Moderate">Moderate (Crop Loss / Perimeter)</option>
                     <option value="Low">Low (Buffer sighting / browse)</option>
                   </select>
+                  {formErrors.severity && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.severity}
+                    </span>
+                  )}
                 </div>
 
                 {/* Village */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-village-input" className="block font-bold text-slate-200 mb-1">
                     Affected Village / Settlement *
                   </label>
                   <input
+                    id="incident-village-input"
                     type="text"
                     placeholder="e.g. Kadambur Fringe, Mangala"
                     value={formData.village}
@@ -627,38 +739,72 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
 
                 {/* Forest Range */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
-                    Forest Range & Beat
+                  <label htmlFor="incident-range-select" className="block font-bold text-slate-200 mb-1">
+                    Forest Range & Beat *
                   </label>
                   <select
+                    id="incident-range-select"
                     value={formData.forestRange}
                     onChange={(e) => setFormData({ ...formData, forestRange: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.forestRange ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select forest range...</option>
                     <option value="Hediyala Range (Beat 4)">Hediyala Range (Beat 4)</option>
                     <option value="Gundlupet Buffer">Gundlupet Buffer</option>
                     <option value="Omkar Range">Omkar Range</option>
                     <option value="Maddur Range">Maddur Range</option>
                     <option value="GS Betta Range">GS Betta Range</option>
                   </select>
+                  {formErrors.forestRange && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.forestRange}
+                    </span>
+                  )}
+                </div>
+
+                {/* District / Division */}
+                <div className="sm:col-span-2">
+                  <label htmlFor="incident-district-input" className="block font-bold text-slate-200 mb-1">
+                    District / Wildlife Division *
+                  </label>
+                  <input
+                    id="incident-district-input"
+                    type="text"
+                    list="incident-division-suggestions"
+                    placeholder="e.g. Bandipur Division"
+                    value={formData.district}
+                    onChange={(e) => setFormData({ ...formData, district: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.district ? 'border-red-500' : 'border-slate-700'
+                    }`}
+                  />
+                  <datalist id="incident-division-suggestions">
+                    {DIVISION_OPTIONS.map((opt) => (
+                      <option key={opt.id} value={opt.id} />
+                    ))}
+                  </datalist>
+                  {formErrors.district && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.district}
+                    </span>
+                  )}
                 </div>
 
                 {/* Latitude & Longitude */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-lat-input" className="block font-bold text-slate-200 mb-1">
                     Latitude (WGS84) *
                   </label>
                   <input
+                    id="incident-lat-input"
                     type="number"
                     step="0.0001"
-                    value={Number.isNaN(formData.latitude) ? '' : formData.latitude}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        latitude: e.target.value === '' ? Number.NaN : parseFloat(e.target.value),
-                      })
-                    }
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                    placeholder="e.g. 11.6640"
+                    value={formData.latitude}
+                    onChange={(e) => setFormData({ ...formData, latitude: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
                       formErrors.latitude ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -670,20 +816,17 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-lng-input" className="block font-bold text-slate-200 mb-1">
                     Longitude (WGS84) *
                   </label>
                   <input
+                    id="incident-lng-input"
                     type="number"
                     step="0.0001"
-                    value={Number.isNaN(formData.longitude) ? '' : formData.longitude}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        longitude: e.target.value === '' ? Number.NaN : parseFloat(e.target.value),
-                      })
-                    }
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                    placeholder="e.g. 76.6220"
+                    value={formData.longitude}
+                    onChange={(e) => setFormData({ ...formData, longitude: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
                       formErrors.longitude ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -696,32 +839,42 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
 
                 {/* Human Injury */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
-                    Human Injury Status
+                  <label htmlFor="incident-injury-select" className="block font-bold text-slate-200 mb-1">
+                    Human Injury Status *
                   </label>
                   <select
+                    id="incident-injury-select"
                     value={formData.humanInjury}
                     onChange={(e) =>
                       setFormData({
                         ...formData,
-                        humanInjury: e.target.value as Incident['humanInjury'],
+                        humanInjury: e.target.value as Incident['humanInjury'] | '',
                       })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.humanInjury ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select human injury status...</option>
                     <option value="None">None</option>
                     <option value="Minor">Minor (First aid administered)</option>
                     <option value="Severe">Severe (Hospitalization required)</option>
                     <option value="Fatal">Fatal</option>
                   </select>
+                  {formErrors.humanInjury && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.humanInjury}
+                    </span>
+                  )}
                 </div>
 
                 {/* Crop Damage */}
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-crop-input" className="block font-bold text-slate-200 mb-1">
                     Estimated Crop Loss (Acres)
                   </label>
                   <input
+                    id="incident-crop-input"
                     type="number"
                     step="0.1"
                     min="0"
@@ -730,11 +883,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                     onChange={(e) =>
                       setFormData({
                         ...formData,
-                        cropDamageEstimatedAcres:
-                          e.target.value === '' ? 0 : parseFloat(e.target.value),
+                        cropDamageEstimatedAcres: e.target.value,
                       })
                     }
-                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
                       formErrors.cropDamageEstimatedAcres ? 'border-red-500' : 'border-slate-700'
                     }`}
                   />
@@ -748,10 +900,11 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
 
               {/* Description */}
               <div>
-                <label className="block font-bold text-slate-200 mb-1">
+                <label htmlFor="incident-description-textarea" className="block font-bold text-slate-200 mb-1">
                   Incident Narrative / Observation Details *
                 </label>
                 <textarea
+                  id="incident-description-textarea"
                   rows={3}
                   placeholder="Provide precise details: herd dynamics, breach point, actions taken by villagers or range guards..."
                   value={formData.description}
@@ -769,10 +922,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
 
               {/* Image Upload / URL */}
               <div>
-                <label className="block font-bold text-slate-200 mb-1 flex items-center justify-between">
+                <label htmlFor="incident-image-input" className="block font-bold text-slate-200 mb-1 flex items-center justify-between">
                   <span>Field Photo / Camera Evidence URL</span>
                   <span className="text-[10px] font-normal text-slate-400">
-                    Pre-loaded or custom link
+                    Optional link
                   </span>
                 </label>
                 <div className="flex items-center gap-2">
@@ -780,43 +933,78 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                     <Camera className="w-4 h-4" />
                   </div>
                   <input
+                    id="incident-image-input"
                     type="url"
-                    placeholder="https://..."
+                    placeholder="https://... (optional)"
                     value={formData.imageUrl}
                     onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   />
                 </div>
               </div>
 
-              {/* Status and Officer */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-800">
+              {/* Status, Reported By, and Officer */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-slate-800">
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">Initial Status</label>
+                  <label htmlFor="incident-status-select" className="block font-bold text-slate-200 mb-1">
+                    Initial Status *
+                  </label>
                   <select
+                    id="incident-status-select"
                     value={formData.status}
                     onChange={(e) =>
-                      setFormData({ ...formData, status: e.target.value as IncidentStatus })
+                      setFormData({ ...formData, status: e.target.value as IncidentStatus | '' })
                     }
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-medium text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.status ? 'border-red-500' : 'border-slate-700'
+                    }`}
                   >
+                    <option value="">Select initial status...</option>
                     <option value="Reported">Reported</option>
                     <option value="Verified">Verified</option>
                     <option value="Patrol Dispatched">Patrol Dispatched</option>
                     <option value="Under Control">Under Control</option>
                     <option value="Resolved">Resolved</option>
                   </select>
+                  {formErrors.status && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.status}
+                    </span>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-200 mb-1">
+                  <label htmlFor="incident-reported-by-input" className="block font-bold text-slate-200 mb-1">
+                    Reported By *
+                  </label>
+                  <input
+                    id="incident-reported-by-input"
+                    type="text"
+                    placeholder="e.g. Village Forest Committee"
+                    value={formData.reportedBy}
+                    onChange={(e) => setFormData({ ...formData, reportedBy: e.target.value })}
+                    className={`w-full bg-slate-950 border rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.reportedBy ? 'border-red-500' : 'border-slate-700'
+                    }`}
+                  />
+                  {formErrors.reportedBy && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.reportedBy}
+                    </span>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="incident-officer-input" className="block font-bold text-slate-200 mb-1">
                     Assigned Field Officer
                   </label>
                   <input
+                    id="incident-officer-input"
                     type="text"
+                    placeholder="e.g. RFO Suresh Kumar (optional)"
                     value={formData.assignedOfficer}
                     onChange={(e) => setFormData({ ...formData, assignedOfficer: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   />
                 </div>
               </div>
@@ -825,7 +1013,7 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
               <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={handleCloseModal}
                   className="px-4 py-2 border border-slate-700 rounded-lg font-semibold text-slate-300 hover:bg-slate-800 transition"
                 >
                   Cancel

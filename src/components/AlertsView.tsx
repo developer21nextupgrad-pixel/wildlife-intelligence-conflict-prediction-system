@@ -45,15 +45,15 @@ const RESPONSE_STATUS_OPTIONS: AlertNotification['responseStatus'][] = [
 interface AlertFormState {
   title: string;
   message: string;
-  severity: IncidentSeverity;
-  species: SpeciesType;
+  severity: IncidentSeverity | '';
+  species: SpeciesType | '';
   affectedVillage: string;
   district: string;
   latitude: string;
   longitude: string;
   triggeredAt: string;
   assignedOfficer: string;
-  responseStatus: AlertNotification['responseStatus'];
+  responseStatus: AlertNotification['responseStatus'] | '';
 }
 
 function toDatetimeLocalValue(isoOrUndefined?: string): string {
@@ -78,15 +78,15 @@ function buildDefaultCreateForm(): AlertFormState {
   return {
     title: '',
     message: '',
-    severity: 'High',
-    species: 'Asian Elephant',
+    severity: '',
+    species: '',
     affectedVillage: '',
-    district: 'Bandipur Division',
-    latitude: '11.6624',
-    longitude: '76.6189',
-    triggeredAt: toDatetimeLocalValue(),
+    district: '',
+    latitude: '',
+    longitude: '',
+    triggeredAt: '',
     assignedOfficer: '',
-    responseStatus: 'Pending Dispatch',
+    responseStatus: '',
   };
 }
 
@@ -194,6 +194,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     if (isSubmittingForm) return;
     setIsFormModalOpen(false);
     setEditingAlert(null);
+    setFormState(buildDefaultCreateForm());
     setFormFieldErrors({});
     setFormSubmitError(null);
   };
@@ -208,6 +209,9 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     const validationErrors = validateAlertInput({
       title: formState.title,
       message: formState.message,
+      severity: formState.severity,
+      species: formState.species,
+      responseStatus: formState.responseStatus,
       affectedVillage: formState.affectedVillage,
       district: formState.district,
       latitude: latNum,
@@ -226,15 +230,17 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     const payload: AlertUpsertInput = {
       title: formState.title.trim(),
       message: formState.message.trim(),
-      severity: formState.severity,
-      species: formState.species,
+      severity: formState.severity as IncidentSeverity,
+      species: formState.species as SpeciesType,
       affectedVillage: formState.affectedVillage.trim(),
       district: formState.district.trim(),
       latitude: latNum,
       longitude: lngNum,
-      triggeredAt: fromDatetimeLocalValue(formState.triggeredAt),
+      triggeredAt: formState.triggeredAt.trim()
+        ? fromDatetimeLocalValue(formState.triggeredAt)
+        : undefined,
       assignedOfficer: formState.assignedOfficer.trim() || undefined,
-      responseStatus: formState.responseStatus,
+      responseStatus: formState.responseStatus as AlertNotification['responseStatus'],
     };
 
     try {
@@ -242,10 +248,12 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
         await onUpdateAlert(editingAlert.id, payload);
         setIsFormModalOpen(false);
         setEditingAlert(null);
+        setFormState(buildDefaultCreateForm());
         showSuccessBanner(`Alert "${payload.title}" updated in PostgreSQL database.`);
       } else {
         await onCreateAlert(payload);
         setIsFormModalOpen(false);
+        setFormState(buildDefaultCreateForm());
         showSuccessBanner(`Alert "${payload.title}" created and persisted to PostgreSQL database.`);
       }
     } catch (err) {
@@ -705,34 +713,45 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                     id="alert-severity-select"
                     value={formState.severity}
                     onChange={(e) =>
-                      setFormState({ ...formState, severity: e.target.value as IncidentSeverity })
+                      setFormState({
+                        ...formState,
+                        severity: e.target.value as IncidentSeverity | '',
+                      })
                     }
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   >
+                    <option value="">Select severity level...</option>
                     <option value="Critical">Critical</option>
                     <option value="High">High</option>
                     <option value="Moderate">Moderate</option>
                   </select>
+                  {formFieldErrors.severity && (
+                    <p className="text-red-400 text-[11px] mt-1">{formFieldErrors.severity}</p>
+                  )}
                 </div>
 
                 <div>
                   <label htmlFor="alert-species-select" className="block font-bold text-slate-200 mb-1">
-                    Species
+                    Species <span className="text-red-400">*</span>
                   </label>
                   <select
                     id="alert-species-select"
                     value={formState.species}
                     onChange={(e) =>
-                      setFormState({ ...formState, species: e.target.value as SpeciesType })
+                      setFormState({ ...formState, species: e.target.value as SpeciesType | '' })
                     }
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   >
+                    <option value="">Select wildlife species...</option>
                     {SPECIES_OPTIONS.map((sp) => (
                       <option key={sp} value={sp}>
                         {sp}
                       </option>
                     ))}
                   </select>
+                  {formFieldErrors.species && (
+                    <p className="text-red-400 text-[11px] mt-1">{formFieldErrors.species}</p>
+                  )}
                 </div>
               </div>
 
@@ -781,9 +800,10 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                     id="alert-lat-input"
                     type="number"
                     step="0.0001"
+                    placeholder="e.g. 11.6624"
                     value={formState.latitude}
                     onChange={(e) => setFormState({ ...formState, latitude: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   />
                   {formFieldErrors.latitude && (
                     <p className="text-red-400 text-[11px] mt-1">{formFieldErrors.latitude}</p>
@@ -798,9 +818,10 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                     id="alert-lng-input"
                     type="number"
                     step="0.0001"
+                    placeholder="e.g. 76.6189"
                     value={formState.longitude}
                     onChange={(e) => setFormState({ ...formState, longitude: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 font-mono text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   />
                   {formFieldErrors.longitude && (
                     <p className="text-red-400 text-[11px] mt-1">{formFieldErrors.longitude}</p>
@@ -838,7 +859,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
 
                 <div>
                   <label htmlFor="alert-status-select" className="block font-bold text-slate-200 mb-1">
-                    Response Status
+                    Response Status <span className="text-red-400">*</span>
                   </label>
                   <select
                     id="alert-status-select"
@@ -846,17 +867,21 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                     onChange={(e) =>
                       setFormState({
                         ...formState,
-                        responseStatus: e.target.value as AlertNotification['responseStatus'],
+                        responseStatus: e.target.value as AlertNotification['responseStatus'] | '',
                       })
                     }
                     className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden"
                   >
+                    <option value="">Select response status...</option>
                     {RESPONSE_STATUS_OPTIONS.map((st) => (
                       <option key={st} value={st}>
                         {st}
                       </option>
                     ))}
                   </select>
+                  {formFieldErrors.responseStatus && (
+                    <p className="text-red-400 text-[11px] mt-1">{formFieldErrors.responseStatus}</p>
+                  )}
                 </div>
               </div>
 

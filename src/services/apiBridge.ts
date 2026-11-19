@@ -95,13 +95,17 @@ export class ApiBridgeError extends Error {
 }
 
 export function getEnvApiBaseUrl(): string {
-  const envUrl =
+  const rawEnv =
     typeof import.meta !== 'undefined' &&
     import.meta.env &&
     typeof import.meta.env.VITE_API_BASE_URL === 'string'
-      ? import.meta.env.VITE_API_BASE_URL
+      ? import.meta.env.VITE_API_BASE_URL.trim()
+      : '';
+  const browserOriginFallback =
+    typeof window !== 'undefined' && window.location?.origin
+      ? `${window.location.origin}/api/v1`
       : DEFAULT_LOCAL_API_BASE_URL;
-  return normalizeApiBaseUrl(envUrl, DEFAULT_LOCAL_API_BASE_URL);
+  return normalizeApiBaseUrl(rawEnv || browserOriginFallback, browserOriginFallback);
 }
 
 export function getConfiguredApiBaseUrl(): string {

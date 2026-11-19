@@ -12,6 +12,7 @@ import {
   validateAlertInput,
   validateCoordinates,
   validateIncidentInput,
+  validatePatrolInput,
   validateSightingInput,
   WicpsDatasetBundle,
 } from './wicpsFilters';
@@ -228,12 +229,61 @@ test('validateCoordinates, validateIncidentInput, and validateSightingInput enfo
   const okAlert = validateAlertInput({
     title: 'Tusker sighting near solar fence',
     message: 'Move patrol unit to Kadambur sector.',
+    severity: 'High',
+    species: 'Asian Elephant',
+    responseStatus: 'Pending Dispatch',
     affectedVillage: 'Kadambur Fringe',
     district: 'Bandipur Division',
     latitude: 11.6624,
     longitude: 76.6189,
   });
   assert.deepEqual(okAlert, {});
+
+  const badPatrol = validatePatrolInput({
+    teamName: '',
+    leadOfficer: '',
+    targetArea: '',
+    sector: '',
+    district: '',
+    priority: '',
+    status: '',
+    scheduledWindow: '',
+    activePersonnel: 0,
+    riskRationale: '',
+    approvedBy: '',
+    latitude: Number.NaN,
+    longitude: 200,
+  });
+  assert.ok(badPatrol.teamName);
+  assert.ok(badPatrol.leadOfficer);
+  assert.ok(badPatrol.targetArea);
+  assert.ok(badPatrol.sector);
+  assert.ok(badPatrol.district);
+  assert.ok(badPatrol.priority);
+  assert.ok(badPatrol.status);
+  assert.ok(badPatrol.scheduledWindow);
+  assert.ok(badPatrol.activePersonnel);
+  assert.ok(badPatrol.riskRationale);
+  assert.ok(badPatrol.approvedBy);
+  assert.ok(badPatrol.latitude);
+  assert.ok(badPatrol.longitude);
+
+  const okPatrol = validatePatrolInput({
+    teamName: 'QRT Gamma',
+    leadOfficer: 'RFO A. Verma',
+    targetArea: 'Kadambur Perimeter',
+    sector: 'Sector 4B',
+    district: 'Bandipur Division',
+    priority: 'High',
+    status: 'Scheduled',
+    scheduledWindow: '20:00 - 04:00 IST',
+    activePersonnel: 5,
+    riskRationale: 'Preventive night corridor monitoring.',
+    approvedBy: 'Duty Officer',
+    latitude: 11.6624,
+    longitude: 76.6189,
+  });
+  assert.deepEqual(okPatrol, {});
 });
 
 test('Core React views render cleanly via SSR with honest DEMO disclaimers and empty states', () => {
@@ -279,10 +329,12 @@ test('Core React views render cleanly via SSR with honest DEMO disclaimers and e
       })),
       onAddSighting: async () => {},
       onUpdateSighting: async () => {},
+      onDeleteSighting: async () => {},
     })
   );
   assert.match(sightCardsHtml, /View Details/);
   assert.match(sightCardsHtml, /Edit/);
+  assert.match(sightCardsHtml, /Delete/);
   assert.match(sightCardsHtml, /sighting-preview\.jpg/);
 
   const alertsHtml = renderToStaticMarkup(

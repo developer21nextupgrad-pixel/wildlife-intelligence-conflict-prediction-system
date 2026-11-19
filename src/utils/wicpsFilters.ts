@@ -269,7 +269,16 @@ export function validateCoordinates(
 }
 
 export interface IncidentValidationInput {
+  species?: string;
+  incidentType?: string;
+  dateTime?: string;
+  severity?: string;
   village: string;
+  district?: string;
+  forestRange?: string;
+  humanInjury?: string;
+  status?: string;
+  reportedBy?: string;
   description: string;
   latitude: number;
   longitude: number;
@@ -280,7 +289,34 @@ export function validateIncidentInput(
   input: IncidentValidationInput
 ): Record<string, string> {
   const errors: Record<string, string> = {};
+  if (input.species !== undefined && !input.species.trim()) {
+    errors.species = 'Wildlife species is required.';
+  }
+  if (input.incidentType !== undefined && !input.incidentType.trim()) {
+    errors.incidentType = 'Incident classification is required.';
+  }
+  if (input.dateTime !== undefined && !input.dateTime.trim()) {
+    errors.dateTime = 'Date & time of occurrence is required.';
+  }
+  if (input.severity !== undefined && !input.severity.trim()) {
+    errors.severity = 'Severity level is required.';
+  }
   if (!input.village.trim()) errors.village = 'Village name is required.';
+  if (input.district !== undefined && !input.district.trim()) {
+    errors.district = 'District / wildlife division is required.';
+  }
+  if (input.forestRange !== undefined && !input.forestRange.trim()) {
+    errors.forestRange = 'Forest range is required.';
+  }
+  if (input.humanInjury !== undefined && !input.humanInjury.trim()) {
+    errors.humanInjury = 'Human injury status is required.';
+  }
+  if (input.status !== undefined && !input.status.trim()) {
+    errors.status = 'Initial status is required.';
+  }
+  if (input.reportedBy !== undefined && !input.reportedBy.trim()) {
+    errors.reportedBy = 'Reporting person / unit is required.';
+  }
   if (!input.description.trim()) errors.description = 'Incident description is required.';
   if (!Number.isFinite(input.cropDamageEstimatedAcres) || input.cropDamageEstimatedAcres < 0) {
     errors.cropDamageEstimatedAcres = 'Crop loss must be 0 or greater.';
@@ -292,6 +328,10 @@ export function validateIncidentInput(
 }
 
 export interface SightingValidationInput {
+  species?: string;
+  timestamp?: string;
+  movementDirection?: string;
+  behavior?: string;
   locationName: string;
   observationDetails: string;
   herdSize: number;
@@ -308,6 +348,18 @@ export function validateSightingInput(
   input: SightingValidationInput
 ): Record<string, string> {
   const errs: Record<string, string> = {};
+  if (input.species !== undefined && !input.species.trim()) {
+    errs.species = 'Wildlife species is required.';
+  }
+  if (input.timestamp !== undefined && !input.timestamp.trim()) {
+    errs.timestamp = 'Sighting date & time is required.';
+  }
+  if (input.movementDirection !== undefined && !input.movementDirection.trim()) {
+    errs.movementDirection = 'Movement direction is required.';
+  }
+  if (input.behavior !== undefined && !input.behavior.trim()) {
+    errs.behavior = 'Observed behavior is required.';
+  }
   if (!input.locationName.trim()) errs.locationName = 'Location name or landmark is required.';
   if (!input.observationDetails.trim()) errs.observationDetails = 'Observation details are required.';
   if (!Number.isFinite(input.herdSize) || input.herdSize < 1 || input.herdSize > 500) {
@@ -336,6 +388,9 @@ export function validateSightingInput(
 export interface AlertValidationInput {
   title: string;
   message: string;
+  severity?: string;
+  species?: string;
+  responseStatus?: string;
   affectedVillage: string;
   district: string;
   latitude: number;
@@ -346,6 +401,15 @@ export function validateAlertInput(input: AlertValidationInput): Record<string, 
   const errs: Record<string, string> = {};
   if (!input.title.trim()) errs.title = 'Alert title is required.';
   if (!input.message.trim()) errs.message = 'Alert message / description is required.';
+  if (input.severity !== undefined && !input.severity.trim()) {
+    errs.severity = 'Severity level is required.';
+  }
+  if (input.species !== undefined && !input.species.trim()) {
+    errs.species = 'Species is required.';
+  }
+  if (input.responseStatus !== undefined && !input.responseStatus.trim()) {
+    errs.responseStatus = 'Response status is required.';
+  }
   if (!input.affectedVillage.trim()) errs.affectedVillage = 'Affected village is required.';
   if (!input.district.trim()) errs.district = 'District / division is required.';
   const coords = validateCoordinates(input.latitude, input.longitude);
@@ -354,3 +418,41 @@ export function validateAlertInput(input: AlertValidationInput): Record<string, 
   return errs;
 }
 
+export interface PatrolValidationInput {
+  teamName: string;
+  leadOfficer: string;
+  targetArea: string;
+  sector: string;
+  district?: string;
+  priority: string;
+  status: string;
+  scheduledWindow: string;
+  activePersonnel: number;
+  riskRationale: string;
+  approvedBy: string;
+  latitude: number;
+  longitude: number;
+}
+
+export function validatePatrolInput(input: PatrolValidationInput): Record<string, string> {
+  const errs: Record<string, string> = {};
+  if (!input.teamName.trim()) errs.teamName = 'Squad designation is required.';
+  if (!input.leadOfficer.trim()) errs.leadOfficer = 'Lead officer is required.';
+  if (!input.targetArea.trim()) errs.targetArea = 'Target area is required.';
+  if (!input.sector.trim()) errs.sector = 'Patrol sector is required.';
+  if (input.district !== undefined && !input.district.trim()) {
+    errs.district = 'District / division is required.';
+  }
+  if (!input.priority.trim()) errs.priority = 'Priority classification is required.';
+  if (!input.status.trim()) errs.status = 'Initial status is required.';
+  if (!input.scheduledWindow.trim()) errs.scheduledWindow = 'Operating window is required.';
+  if (!Number.isFinite(input.activePersonnel) || input.activePersonnel < 1 || input.activePersonnel > 200) {
+    errs.activePersonnel = 'Personnel count must be between 1 and 200.';
+  }
+  if (!input.riskRationale.trim()) errs.riskRationale = 'Deployment rationale is required.';
+  if (!input.approvedBy.trim()) errs.approvedBy = 'Authorizing officer is required.';
+  const coords = validateCoordinates(input.latitude, input.longitude);
+  if (coords.latError) errs.latitude = coords.latError;
+  if (coords.lngError) errs.longitude = coords.lngError;
+  return errs;
+}

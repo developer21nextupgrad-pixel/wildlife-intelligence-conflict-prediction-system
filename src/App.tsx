@@ -189,6 +189,13 @@ export default function App() {
     setApiError(null);
   };
 
+  const handleDeleteSighting = async (id: string) => {
+    await apiBridge.deleteSighting(id);
+    const refreshed = await apiBridge.getSightings();
+    setSightings(refreshed);
+    setApiError(null);
+  };
+
   const handleCreateAlert = async (data: AlertUpsertInput) => {
     await apiBridge.createAlert(data);
     const refreshed = await apiBridge.getAlerts();
@@ -522,6 +529,7 @@ export default function App() {
               onResetGlobalFilters={handleResetGlobalFilters}
               onAddSighting={handleAddSighting}
               onUpdateSighting={handleUpdateSighting}
+              onDeleteSighting={handleDeleteSighting}
               isApiLoading={isSyncingApi}
               apiError={apiError}
               onRetrySync={refreshAllData}
