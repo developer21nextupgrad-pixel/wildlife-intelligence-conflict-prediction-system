@@ -38,6 +38,7 @@ import {
   RotateCcw,
   Search,
   ShieldAlert,
+  Trash2,
   Upload,
   X,
   XCircle,
@@ -183,8 +184,11 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
   const [isTestingRtsp, setIsTestingRtsp] = useState<boolean>(false);
   const [rtspResult, setRtspResult] = useState<RtspTestPullResult | null>(null);
 
-  // Per-camera status update tracking
+  // Per-camera status update & delete confirmation state
   const [updatingCameraId, setUpdatingCameraId] = useState<string | null>(null);
+  const [cameraPendingDelete, setCameraPendingDelete] = useState<ThermalCamera | null>(null);
+  const [cameraDeleteError, setCameraDeleteError] = useState<string | null>(null);
+  const [isDeletingCamera, setIsDeletingCamera] = useState<boolean>(false);
 
   // Image loading errors for inspector
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
@@ -383,6 +387,66 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
       });
     } finally {
       setUpdatingCameraId(null);
+    }
+  };
+
+  const handleOpenDeleteCameraModal = (camera: ThermalCamera) => {
+    setCameraDeleteError(null);
+    setCameraPendingDelete(camera);
+  };
+
+  const handleConfirmDeleteCamera = async () => {
+    if (!cameraPendingDelete || isDeletingCamera) return;
+
+    const target = cameraPendingDelete;
+    setIsDeletingCamera(true);
+    setCameraDeleteError(null);
+    try {
+      const result = await apiBridge.deleteCamera(target.id);
+      setCameraPendingDelete(null);
+
+      if (issuedCameraSecret?.id === target.id) {
+        setIssuedCameraSecret(null);
+      }
+      if (uploadCameraId === target.id) {
+        setUploadCameraId('');
+      }
+      if (rtspForm.cameraId === target.id) {
+        setRtspForm((prev) => ({ ...prev, cameraId: '' }));
+      }
+
+      const nextFilters: ThermalFrameFilterParams =
+        filterCameraId === target.id
+          ? { ...activeFilters, cameraId: 'All', page: 1 }
+          : activeFilters;
+
+      if (filterCameraId === target.id) {
+        setFilterCameraId('All');
+        setPage(1);
+      } else {
+        await loadData(nextFilters);
+      }
+
+      const preservedCount = result.preserved_frames ?? 0;
+      setNoticeBanner({
+        type: 'success',
+        message:
+          preservedCount > 0
+            ? `Deleted thermal camera ${target.cameraCode} (${target.name}). ${preservedCount} historical thermal frame(s) and storage objects were preserved.`
+            : `Deleted thermal camera ${target.cameraCode} (${target.name}).`,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : `Failed to delete thermal camera ${target.cameraCode}.`;
+      setCameraDeleteError(msg);
+      setNoticeBanner({
+        type: 'error',
+        message: msg,
+      });
+    } finally {
+      setIsDeletingCamera(false);
     }
   };
 
@@ -875,6 +939,16 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                         >
                           Test RTSP
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenDeleteCameraModal(cam)}
+                          aria-label={`Delete camera ${cam.cameraCode}`}
+                          title={`Delete ${cam.cameraCode}`}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-red-950/70 hover:bg-red-900/80 text-red-300 border border-red-800/60 rounded-md text-[11px] font-medium transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Delete</span>
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -1068,8 +1142,13 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                       </div>
                       <div className="text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
                         <span className="font-mono text-emerald-300/90">
-                          {frame.cameraCode || 'CAM'}
+                          {frame.cameraCode || 'Archived Camera'}
                         </span>
+                        {!frame.cameraId && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                            Deleted Camera
+                          </span>
+                        )}
                         <span>·</span>
                         <span>
                           {frame.width}×{frame.height}
@@ -2098,6 +2177,97 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                 alt={previewLightbox.title}
                 className="max-h-[75vh] max-w-full object-contain"
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal 5: Delete Registered Thermal Camera Confirmation */}
+      {cameraPendingDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-camera-title"
+            className="bg-slate-900 border border-red-800/70 rounded-2xl w-full max-w-md shadow-2xl overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-red-400">
+                  Camera Endpoint Removal
+                </span>
+                <h2 id="delete-camera-title" className="text-sm font-bold text-white mt-0.5">
+                  Delete Thermal Camera
+                </h2>
+              </div>
+              <button
+                type="button"
+                disabled={isDeletingCamera}
+                onClick={() => setCameraPendingDelete(null)}
+                aria-label="Close Delete Camera dialog"
+                className="text-slate-400 hover:text-white p-1 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              {cameraDeleteError && (
+                <div
+                  role="alert"
+                  className="bg-red-950/70 border border-red-700/70 text-red-100 px-3 py-2 rounded-lg"
+                >
+                  {cameraDeleteError}
+                </div>
+              )}
+
+              <p className="text-slate-300">
+                Are you sure you want to delete this registered thermal camera from the database?
+              </p>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-mono text-slate-400">Camera ID</span>
+                  <span className="font-mono font-bold text-emerald-300">
+                    {cameraPendingDelete.cameraCode}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-mono text-slate-400">Camera Name</span>
+                  <span className="font-semibold text-white text-right">
+                    {cameraPendingDelete.name}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-mono text-slate-400">Zone / Protocol</span>
+                  <span className="text-slate-300 text-right">
+                    {cameraPendingDelete.zoneName} · {cameraPendingDelete.protocol}
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-emerald-950/35 border border-emerald-800/50 text-emerald-200 rounded-lg p-2.5 text-[11px]">
+                Historical thermal frames, QC metrics, audit records, and object storage artifacts associated with this camera will be preserved.
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  disabled={isDeletingCamera}
+                  onClick={() => setCameraPendingDelete(null)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-semibold disabled:opacity-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeletingCamera}
+                  onClick={handleConfirmDeleteCamera}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-xl font-bold disabled:opacity-50 cursor-pointer"
+                >
+                  {isDeletingCamera ? 'Deleting...' : 'Confirm Delete'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

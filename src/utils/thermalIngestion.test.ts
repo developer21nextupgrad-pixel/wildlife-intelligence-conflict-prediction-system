@@ -171,6 +171,33 @@ test('thermal frame, dev sample, and RTSP mappers handle QC accepted and rejecte
   assert.equal(ingest.extractedCount, 10);
   assert.equal(ingest.videoSummary?.target_fps, 5);
 
+  const detachedFrame = mapThermalFrameFromApi({
+    id: 'frame-archived-1',
+    camera_id: null,
+    camera_code: 'CAM-TEST-001',
+    camera_name: 'Retired Test Tower',
+    zone_name: 'Mangala Perimeter',
+    capture_mode: 'http_push',
+    source_filename: 'archived.png',
+    captured_at: '2026-02-01T10:00:00Z',
+    frame_index: 0,
+    width: 640,
+    height: 512,
+    pixel_format: 'uint8_gray',
+    qc_passed: true,
+    qc_metrics: { bit_depth: 8 },
+    rejection_reason: null,
+    raw_object_key: 'raw-frames/CAM-TEST-001/2026-02-01/frame-archived-1.png',
+    processed_object_key: 'processed-frames/CAM-TEST-001/2026-02-01/frame-archived-1_640x640.png',
+    processing_status: 'preprocessed',
+    is_dev_test: true,
+    created_at: '2026-02-01T10:00:00Z',
+    updated_at: '2026-02-01T10:00:00Z',
+  });
+  assert.equal(detachedFrame.cameraId, null);
+  assert.equal(detachedFrame.cameraCode, 'CAM-TEST-001');
+  assert.equal(detachedFrame.cameraName, 'Retired Test Tower');
+
   const rtsp = mapRtspTestPullFromApi({
     reachable: true,
     masked_rtsp_url: 'rtsp://***@10.0.0.5/stream',

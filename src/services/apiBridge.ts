@@ -523,6 +523,22 @@ export const apiBridge = {
     return mapCameraFromApi(updated);
   },
 
+  async deleteCamera(cameraId: string): Promise<{
+    status: string;
+    id: string;
+    camera_code?: string;
+    preserved_frames?: number;
+  }> {
+    return apiRequest<{
+      status: string;
+      id: string;
+      camera_code?: string;
+      preserved_frames?: number;
+    }>(`/cameras/${cameraId}`, {
+      method: 'DELETE',
+    });
+  },
+
   async getThermalFrames(filters: ThermalFrameFilterParams = {}): Promise<{
     items: ThermalFrameRecord[];
     total: number;

@@ -1,13 +1,14 @@
 from datetime import datetime, timezone
 import logging
+from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
-from app.models import Camera, Village
+from app.models import Camera, ThermalFrame, Village
 from app.schemas.camera import (
     CameraCreate,
     CameraCreateResponse,
@@ -200,3 +201,43 @@ def camera_heartbeat(
     db.commit()
     db.refresh(record)
     return CameraResponse.model_validate(record)
+
+
+@router.delete("/{camera_id}")
+def delete_camera(camera_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
+    record = db.get(Camera, camera_id)
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Camera not found.",
+        )
+
+    preserved_result = db.execute(
+        update(ThermalFrame)
+        .where(ThermalFrame.camera_id == record.id)
+        .values(
+            camera_code_snapshot=record.camera_code,
+            camera_name_snapshot=record.name,
+            zone_name_snapshot=record.zone_name,
+            camera_id=None,
+        )
+    )
+    preserved_frames = int(preserved_result.rowcount or 0)
+    deleted_code = record.camera_code
+
+    db.delete(record)
+    db.commit()
+
+    logger.info(
+        "Deleted thermal camera camera_code=%s id=%s preserved_frames=%d",
+        deleted_code,
+        camera_id,
+        preserved_frames,
+    )
+    return {
+        "status": "deleted",
+        "id": str(camera_id),
+        "camera_code": deleted_code,
+        "preserved_frames": preserved_frames,
+    }
+

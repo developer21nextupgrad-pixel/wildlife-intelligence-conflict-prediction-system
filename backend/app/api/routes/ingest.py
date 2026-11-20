@@ -70,9 +70,9 @@ def _frame_to_response(
     return ThermalFrameResponse(
         id=frame.id,
         camera_id=frame.camera_id,
-        camera_code=camera.camera_code if camera else None,
-        camera_name=camera.name if camera else None,
-        zone_name=camera.zone_name if camera else None,
+        camera_code=camera.camera_code if camera else frame.camera_code_snapshot,
+        camera_name=camera.name if camera else frame.camera_name_snapshot,
+        zone_name=camera.zone_name if camera else frame.zone_name_snapshot,
         capture_mode=frame.capture_mode,
         source_filename=frame.source_filename,
         captured_at=frame.captured_at,
@@ -117,6 +117,9 @@ def _persist_frame_outcome(
     record = ThermalFrame(
         id=frame_id,
         camera_id=camera.id,
+        camera_code_snapshot=camera.camera_code,
+        camera_name_snapshot=camera.name,
+        zone_name_snapshot=camera.zone_name,
         capture_mode=capture_mode,
         source_filename=source_filename,
         captured_at=outcome.captured_at,
@@ -457,14 +460,20 @@ def list_ingested_frames(
         db, stmt, page, page_size
     )
 
-    cam_ids = {item.camera_id for item in items}
+    cam_ids = {item.camera_id for item in items if item.camera_id is not None}
     cameras_by_id: dict[uuid.UUID, Camera] = {}
     if cam_ids:
         cams = db.execute(select(Camera).where(Camera.id.in_(cam_ids))).scalars().all()
         cameras_by_id = {c.id: c for c in cams}
 
     return PaginatedResponse[ThermalFrameResponse](
-        items=[_frame_to_response(item, cameras_by_id.get(item.camera_id)) for item in items],
+        items=[
+            _frame_to_response(
+                item,
+                cameras_by_id.get(item.camera_id) if item.camera_id is not None else None,
+            )
+            for item in items
+        ],
         total=total,
         page=current_page,
         page_size=current_size,

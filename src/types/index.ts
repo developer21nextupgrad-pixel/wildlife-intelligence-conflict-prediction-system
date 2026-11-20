@@ -267,7 +267,7 @@ export interface ThermalFrameQcMetrics {
 
 export interface ThermalFrameRecord {
   id: string;
-  cameraId: string;
+  cameraId: string | null;
   cameraCode?: string | null;
   cameraName?: string | null;
   zoneName?: string | null;

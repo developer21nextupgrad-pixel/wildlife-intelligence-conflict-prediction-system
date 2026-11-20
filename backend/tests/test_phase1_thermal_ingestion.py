@@ -489,6 +489,9 @@ def test_alembic_upgrade_0001_and_0002_on_sqlite(tmp_path: Path, monkeypatch):
         command.upgrade(cfg, "head")
         command.downgrade(cfg, "0001_initial_schema")
         command.upgrade(cfg, "0002_cameras_and_thermal_frames")
+        command.upgrade(cfg, "0003_preserve_thermal_frames_on_camera_delete")
+        command.downgrade(cfg, "0002_cameras_and_thermal_frames")
+        command.upgrade(cfg, "head")
     finally:
         get_settings.cache_clear()
 
@@ -577,4 +580,75 @@ def test_camera_village_name_fallback_when_villages_empty(phase1_client):
         },
     )
     assert bad_res.status_code == 422
+
+
+def test_delete_camera_preserves_historical_frames_and_storage_objects(phase1_client):
+    client, storage = phase1_client
+
+    reg = client.post(
+        "/api/v1/cameras",
+        json={
+            "camera_code": "CAM-DEL-PRESERVE-01",
+            "name": "Delete Preservation Tower",
+            "zone_name": "South Buffer",
+            "zone_type": "crop_field",
+            "latitude": 11.66,
+            "longitude": 76.62,
+            "protocol": "http_push",
+            "is_dev_test": True,
+        },
+    )
+    assert reg.status_code == 201
+    cam = reg.json()
+    cam_id = cam["id"]
+    api_key = cam["api_key"]
+
+    img = _make_synthetic_thermal_8bit(320, 240)
+    ok, png_buf = cv2.imencode(".png", img)
+    assert ok
+    meta = json.dumps({"camera_id": "CAM-DEL-PRESERVE-01", "timestamp": "2026-11-20T09:00:00Z"})
+    ingest_res = client.post(
+        "/api/v1/ingest/frames",
+        headers={"X-Camera-Key": api_key},
+        data={"metadata": meta},
+        files={"file": ("preserve_check.png", png_buf.tobytes(), "image/png")},
+    )
+    assert ingest_res.status_code == 201
+    frame = ingest_res.json()
+    frame_id = frame["id"]
+    raw_key = frame["raw_object_key"]
+    proc_key = frame["processed_object_key"]
+    assert proc_key is not None
+
+    # Delete the registered camera
+    del_res = client.delete(f"/api/v1/cameras/{cam_id}")
+    assert del_res.status_code == 200
+    del_body = del_res.json()
+    assert del_body["status"] == "deleted"
+    assert del_body["id"] == cam_id
+    assert del_body["camera_code"] == "CAM-DEL-PRESERVE-01"
+    assert del_body["preserved_frames"] == 1
+
+    # Camera is gone from camera list and 404 on repeat delete
+    cams_after = client.get("/api/v1/cameras").json()["items"]
+    assert all(c["id"] != cam_id for c in cams_after)
+    assert client.delete(f"/api/v1/cameras/{cam_id}").status_code == 404
+
+    # Historical thermal frame and provenance snapshot remain intact
+    frames_after = client.get("/api/v1/ingest/frames").json()["items"]
+    preserved = next((f for f in frames_after if f["id"] == frame_id), None)
+    assert preserved is not None
+    assert preserved["camera_id"] is None
+    assert preserved["camera_code"] == "CAM-DEL-PRESERVE-01"
+    assert preserved["camera_name"] == "Delete Preservation Tower"
+    assert preserved["zone_name"] == "South Buffer"
+    assert preserved["raw_object_key"] == raw_key
+    assert preserved["processed_object_key"] == proc_key
+
+    # Object storage artifacts remain readable via image endpoint and backend storage
+    assert len(storage.get_bytes(raw_key)) > 0
+    assert len(storage.get_bytes(proc_key)) > 0
+    assert client.get(f"/api/v1/ingest/frames/{frame_id}/image?variant=raw").status_code == 200
+    assert client.get(f"/api/v1/ingest/frames/{frame_id}/image?variant=processed").status_code == 200
+
 

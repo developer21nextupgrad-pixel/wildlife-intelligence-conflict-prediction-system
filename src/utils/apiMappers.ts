@@ -635,7 +635,7 @@ export interface ApiCameraCreateDto extends ApiCameraDto {
 
 export interface ApiThermalFrameDto {
   id: string;
-  camera_id: string;
+  camera_id?: string | null;
   camera_code?: string | null;
   camera_name?: string | null;
   zone_name?: string | null;
@@ -735,7 +735,7 @@ export function mapCameraToCreatePayload(
 export function mapThermalFrameFromApi(dto: ApiThermalFrameDto): ThermalFrameRecord {
   return {
     id: dto.id,
-    cameraId: dto.camera_id,
+    cameraId: dto.camera_id ?? null,
     cameraCode: dto.camera_code ?? null,
     cameraName: dto.camera_name ?? null,
     zoneName: dto.zone_name ?? null,

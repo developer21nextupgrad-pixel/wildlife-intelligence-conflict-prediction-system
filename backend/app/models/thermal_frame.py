@@ -29,9 +29,12 @@ class ThermalFrame(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    camera_id: Mapped[uuid.UUID] = mapped_column(
-        GUID(), ForeignKey("cameras.id", ondelete="CASCADE"), nullable=False, index=True
+    camera_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    camera_code_snapshot: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    camera_name_snapshot: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    zone_name_snapshot: Mapped[str | None] = mapped_column(String(160), nullable=True)
     capture_mode: Mapped[str] = mapped_column(
         String(32), nullable=False, default="dev_sample_upload"
     )
