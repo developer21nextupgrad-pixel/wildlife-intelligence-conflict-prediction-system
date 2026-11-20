@@ -7,11 +7,15 @@ import {
   mapAlertToUpdatePayload,
   mapIncidentFromApi,
   mapIncidentToCreatePayload,
+  mapIncidentToUpdatePayload,
   mapPatrolFromApi,
   mapPatrolToCreatePayload,
+  mapPatrolToUpdatePayload,
+  mapRiskZoneFromGeoJson,
   mapSightingFromApi,
   mapSightingToCreatePayload,
   mapSightingToUpdatePayload,
+  mapVillageFromApi,
 } from './apiMappers';
 
 test('mapIncidentFromApi and mapIncidentToCreatePayload preserve coordinates and isDemo flag', () => {
@@ -240,3 +244,132 @@ test('mapSightingToUpdatePayload normalizes edited fields and preserves or clear
   const untouchedPhoto = mapSightingToUpdatePayload({ herdSize: 3 });
   assert.equal('photo_url' in untouchedPhoto, false);
 });
+
+test('mapIncidentToUpdatePayload maps edited incident fields and clears optional nulls explicitly', () => {
+  const payload = mapIncidentToUpdatePayload({
+    species: 'Bengal Tiger',
+    dateTime: '2026-11-18T14:15:00Z',
+    latitude: 11.6512,
+    longitude: 76.6095,
+    village: '  Mangala Settlement  ',
+    district: '  Bandipur Division  ',
+    forestRange: '  Gundlupet Buffer  ',
+    incidentType: 'Livestock Predation',
+    severity: 'Critical',
+    humanInjury: 'Minor',
+    humanInjuriesCount: 1,
+    livestockLossCount: 2,
+    cropDamageEstimatedAcres: 1.5,
+    cropType: '  ',
+    description: '  Confirmed tiger attack near cattle shed  ',
+    imageUrl: '  ',
+    status: 'Patrol Dispatched',
+    reportedBy: '  RFO Suresh Kumar  ',
+    assignedOfficer: '   ',
+    actionTaken: '  Dispatched QRT Alpha  ',
+  });
+
+  assert.equal(payload.species, 'Bengal Tiger');
+  assert.equal(payload.village, 'Mangala Settlement');
+  assert.equal(payload.forest_range, 'Gundlupet Buffer');
+  assert.equal(payload.human_injuries_count, 1);
+  assert.equal(payload.livestock_loss_count, 2);
+  assert.equal(payload.crop_damage_estimated_acres, 1.5);
+  assert.equal(payload.crop_type, null);
+  assert.equal(payload.image_url, null);
+  assert.equal(payload.assigned_officer, null);
+  assert.equal(payload.action_taken, 'Dispatched QRT Alpha');
+  assert.equal(payload.status, 'Patrol Dispatched');
+});
+
+test('mapPatrolToUpdatePayload maps patrol fields and coordinates cleanly', () => {
+  const payload = mapPatrolToUpdatePayload({
+    teamName: '  QRT Delta  ',
+    leadOfficer: '  RFO K. Natarajan  ',
+    targetArea: '  Mangala - Gundlupet Buffer  ',
+    sector: '  Gundlupet Beat 01  ',
+    district: '  Bandipur Division  ',
+    priority: 'Critical',
+    status: 'In Progress',
+    scheduledWindow: '  2026-11-19 | 19:00 - 05:00 IST  ',
+    activePersonnel: 7,
+    equipment: ['Thermal Monocular', 'GPS Beacon'],
+    riskRationale: '  Elevated corridor movement  ',
+    approvedBy: '  DFO Bandipur  ',
+    coordinates: [11.659, 76.648],
+  });
+
+  assert.equal(payload.team_name, 'QRT Delta');
+  assert.equal(payload.lead_officer, 'RFO K. Natarajan');
+  assert.equal(payload.target_area, 'Mangala - Gundlupet Buffer');
+  assert.equal(payload.scheduled_window, '2026-11-19 | 19:00 - 05:00 IST');
+  assert.equal(payload.active_personnel, 7);
+  assert.deepEqual(payload.equipment, ['Thermal Monocular', 'GPS Beacon']);
+  assert.equal(payload.latitude, 11.659);
+  assert.equal(payload.longitude, 76.648);
+});
+
+test('mapVillageFromApi and mapRiskZoneFromGeoJson convert API DTOs and [lng, lat] rings', () => {
+  const village = mapVillageFromApi({
+    id: 'vil-1',
+    name: 'Kadambur Fringe',
+    district: 'Bandipur Division',
+    forest_range: 'Hediyala Range',
+    population: 1450,
+    households: 320,
+    forest_distance_km: 0.4,
+    latitude: 11.662,
+    longitude: 76.618,
+    risk_level: 'Critical',
+    risk_score: 92,
+    active_solar_fence: true,
+    fence_status: 'Breached',
+    assigned_rrt: 'RRT Hediyala Alpha',
+    emergency_contact: '+91-98450-11223',
+    recent_incidents_30d: 4,
+    is_demo: true,
+  });
+
+  assert.equal(village.forestRange, 'Hediyala Range');
+  assert.deepEqual(village.coordinates, [11.662, 76.618]);
+  assert.equal(village.isDemo, true);
+
+  const riskZone = mapRiskZoneFromGeoJson({
+    type: 'Feature',
+    geometry: {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [76.61, 11.66],
+          [76.63, 11.66],
+          [76.63, 11.67],
+          [76.61, 11.66],
+        ],
+      ],
+    },
+    properties: {
+      id: 'rz-1',
+      name: 'Kadambur Corridor',
+      district: 'Bandipur Division',
+      forest_range: 'Hediyala Range',
+      risk_level: 'Critical',
+      risk_score: 94,
+      dominant_species: 'Asian Elephant',
+      center_lat: 11.663,
+      center_lng: 76.62,
+      active_alert_count: 2,
+      primary_risk_factor: 'Solar fence breach',
+      is_demo: true,
+    },
+  });
+
+  assert.equal(riskZone.range, 'Hediyala Range');
+  assert.deepEqual(riskZone.centerCoordinates, [11.663, 76.62]);
+  assert.deepEqual(riskZone.polygonCoordinates, [
+    [11.66, 76.61],
+    [11.66, 76.63],
+    [11.67, 76.63],
+  ]);
+  assert.equal(riskZone.isDemo, true);
+});
+

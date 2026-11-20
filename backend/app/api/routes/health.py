@@ -8,11 +8,13 @@ from app.core.config import Settings, get_settings
 from app.core.database import check_database_health, get_db
 from app.models import (
     Alert,
+    Camera,
     Incident,
     Patrol,
     RiskZone,
     Sighting,
     TelemetryRecord,
+    ThermalFrame,
     Village,
 )
 from app.schemas.common import DatabaseHealthResponse, HealthResponse
@@ -45,6 +47,10 @@ def database_health_check(db: Session = Depends(get_db)) -> DatabaseHealthRespon
             "patrols": int(db.execute(select(func.count(Patrol.id))).scalar_one() or 0),
             "telemetry_records": int(
                 db.execute(select(func.count(TelemetryRecord.id))).scalar_one() or 0
+            ),
+            "cameras": int(db.execute(select(func.count(Camera.id))).scalar_one() or 0),
+            "thermal_frames": int(
+                db.execute(select(func.count(ThermalFrame.id))).scalar_one() or 0
             ),
         }
         return DatabaseHealthResponse(

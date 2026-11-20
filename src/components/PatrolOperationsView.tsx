@@ -8,6 +8,8 @@ import {
   Search,
   X,
   AlertCircle,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
 import { DIVISION_OPTIONS, validatePatrolInput } from '../utils/wicpsFilters';
@@ -50,10 +52,33 @@ function buildEmptyPatrolForm(): PatrolFormState {
   };
 }
 
+function buildFormFromPatrol(patrol: PatrolOperation): PatrolFormState {
+  return {
+    teamName: patrol.teamName,
+    leadOfficer: patrol.leadOfficer,
+    targetArea: patrol.targetArea,
+    sector: patrol.sector,
+    district: patrol.district || 'Bandipur Division',
+    priority: patrol.priority,
+    status: patrol.status,
+    scheduledWindow: patrol.scheduledWindow,
+    activePersonnel: String(patrol.activePersonnel),
+    equipmentText: patrol.equipment.join(', '),
+    riskRationale: patrol.riskRationale,
+    approvedBy: patrol.approvedBy,
+    latitude: String(patrol.coordinates[0]),
+    longitude: String(patrol.coordinates[1]),
+  };
+}
+
 interface PatrolOperationsViewProps {
   patrols: PatrolOperation[];
   onUpdateStatus: (id: string, status: PatrolOperation['status']) => Promise<void>;
   onCreatePatrol: (patrol: Omit<PatrolOperation, 'id' | 'patrolCode'>) => Promise<void>;
+  onUpdatePatrol?: (
+    id: string,
+    updates: Partial<Omit<PatrolOperation, 'id' | 'patrolCode'>>
+  ) => Promise<void>;
   onDeletePatrol?: (id: string) => Promise<void>;
   onNavigateToMap: () => void;
   isApiLoading?: boolean;
@@ -65,6 +90,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
   patrols,
   onUpdateStatus,
   onCreatePatrol,
+  onUpdatePatrol,
   onDeletePatrol,
   onNavigateToMap,
   isApiLoading = false,
@@ -75,12 +101,16 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [filterPriority, setFilterPriority] = useState('All');
   const [isPlanModalOpen, setIsPlanModalOpen] = useState(false);
+  const [editingPatrol, setEditingPatrol] = useState<PatrolOperation | null>(null);
+  const [patrolPendingDelete, setPatrolPendingDelete] = useState<PatrolOperation | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [updatingPatrolId, setUpdatingPatrolId] = useState<string | null>(null);
 
-  // New Patrol Form State
+  // Patrol Form State
   const [formData, setFormData] = useState<PatrolFormState>(buildEmptyPatrolForm);
   const [formFieldErrors, setFormFieldErrors] = useState<Record<string, string>>({});
 
@@ -139,7 +169,16 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
   ];
 
   const handleOpenPlanModal = () => {
+    setEditingPatrol(null);
     setFormData(buildEmptyPatrolForm());
+    setFormFieldErrors({});
+    setModalError(null);
+    setIsPlanModalOpen(true);
+  };
+
+  const handleOpenEditModal = (patrol: PatrolOperation) => {
+    setEditingPatrol(patrol);
+    setFormData(buildFormFromPatrol(patrol));
     setFormFieldErrors({});
     setModalError(null);
     setIsPlanModalOpen(true);
@@ -148,12 +187,13 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
   const handleClosePlanModal = () => {
     if (isSubmitting) return;
     setIsPlanModalOpen(false);
+    setEditingPatrol(null);
     setFormData(buildEmptyPatrolForm());
     setFormFieldErrors({});
     setModalError(null);
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
+  const handleSavePatrolSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
 
@@ -179,7 +219,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
 
     setFormFieldErrors(validationErrors);
     if (Object.keys(validationErrors).length > 0) {
-      setModalError('Please correct the highlighted fields before scheduling the patrol.');
+      setModalError('Please correct the highlighted fields before saving the patrol operation.');
       return;
     }
 
@@ -208,20 +248,46 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
     setModalError(null);
     setActionError(null);
     try {
-      await onCreatePatrol(payload);
+      if (editingPatrol && onUpdatePatrol) {
+        await onUpdatePatrol(editingPatrol.id, payload);
+        setToastMessage(`Patrol ${editingPatrol.patrolCode} updated in PostgreSQL/PostGIS database.`);
+      } else {
+        await onCreatePatrol(payload);
+        setToastMessage('Patrol schedule persisted to PostgreSQL/PostGIS database.');
+      }
       setIsSubmitting(false);
       setIsPlanModalOpen(false);
+      setEditingPatrol(null);
       setFormData(buildEmptyPatrolForm());
       setFormFieldErrors({});
-      setToastMessage('Patrol schedule persisted to PostgreSQL/PostGIS database.');
       setTimeout(() => setToastMessage(null), 4000);
     } catch (err) {
       setIsSubmitting(false);
       setModalError(
         err instanceof Error
           ? err.message
-          : 'Failed to schedule patrol operation. Your inputs have been preserved.'
+          : 'Failed to save patrol operation. Your inputs have been preserved.'
       );
+    }
+  };
+
+  const handleConfirmDeletePatrol = async () => {
+    if (!patrolPendingDelete || !onDeletePatrol || isDeleting) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    setActionError(null);
+    try {
+      await onDeletePatrol(patrolPendingDelete.id);
+      const deletedCode = patrolPendingDelete.patrolCode;
+      setPatrolPendingDelete(null);
+      setToastMessage(`Patrol ${deletedCode} deleted from PostgreSQL/PostGIS database.`);
+      setTimeout(() => setToastMessage(null), 4000);
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error ? err.message : 'Failed to delete patrol from backend.'
+      );
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -247,6 +313,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
         leadOfficer: 'Range Forest Officer (Assigned)',
         targetArea: rec.title,
         sector: rec.targetSector,
+        district: 'Bandipur Division',
         priority: rec.priority === 'Moderate' ? 'Medium' : rec.priority,
         status: 'Scheduled',
         scheduledWindow: rec.recommendedWindow,
@@ -606,7 +673,19 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
                       <span>Inspect Sector on GIS Map</span>
                     </button>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {onUpdatePatrol && (
+                        <button
+                          type="button"
+                          disabled={updatingPatrolId === patrol.id}
+                          onClick={() => handleOpenEditModal(patrol)}
+                          aria-label={`Edit patrol ${patrol.patrolCode}`}
+                          className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded text-[11px] font-semibold transition inline-flex items-center gap-1 disabled:opacity-60"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>Edit</span>
+                        </button>
+                      )}
                       {patrol.status !== 'In Progress' && (
                         <button
                           disabled={updatingPatrolId === patrol.id}
@@ -636,25 +715,17 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
                       )}
                       {onDeletePatrol && (
                         <button
+                          type="button"
                           disabled={updatingPatrolId === patrol.id}
-                          onClick={async () => {
-                            setUpdatingPatrolId(patrol.id);
-                            setActionError(null);
-                            try {
-                              await onDeletePatrol(patrol.id);
-                            } catch (err) {
-                              setActionError(
-                                err instanceof Error
-                                  ? err.message
-                                  : 'Failed to delete patrol.'
-                              );
-                            } finally {
-                              setUpdatingPatrolId(null);
-                            }
+                          onClick={() => {
+                            setDeleteError(null);
+                            setPatrolPendingDelete(patrol);
                           }}
-                          className="px-2 py-1 bg-red-950/70 hover:bg-red-900/70 border border-red-800/50 text-red-300 rounded text-[11px] transition disabled:opacity-60"
+                          aria-label={`Delete patrol ${patrol.patrolCode}`}
+                          className="px-2 py-1 bg-red-950/70 hover:bg-red-900/70 border border-red-800/50 text-red-300 rounded text-[11px] transition inline-flex items-center gap-1 disabled:opacity-60"
                         >
-                          Remove
+                          <Trash2 className="w-3 h-3" />
+                          <span>Remove</span>
                         </button>
                       )}
                     </div>
@@ -675,7 +746,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
               <span>Officer Authority & Demo Route Suggestions</span>
             </div>
             <p className="text-sky-300/80 leading-relaxed">
-              These patrol recommendations are static prototype samples illustrating how risk scores could inform beat scheduling. Approving a route adds it to your local browser roster.
+              These patrol recommendations are static prototype samples illustrating how risk scores could inform beat scheduling. Approving a route schedules and persists it to the operational patrol database.
             </p>
           </div>
 
@@ -766,6 +837,9 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
                 <th className="py-3 px-4">Personnel</th>
                 <th className="py-3 px-4">Shift Details</th>
                 <th className="py-3 px-4">Status</th>
+                {(onUpdatePatrol || onDeletePatrol) && (
+                  <th className="py-3 px-4 text-right">Actions</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
@@ -782,6 +856,37 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
                       Completed & Logged
                     </span>
                   </td>
+                  {(onUpdatePatrol || onDeletePatrol) && (
+                    <td className="py-3 px-4 text-right">
+                      <div className="inline-flex items-center gap-1.5">
+                        {onUpdatePatrol && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(p)}
+                            aria-label={`Edit patrol ${p.patrolCode}`}
+                            className="px-2 py-1 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded text-[11px] font-semibold inline-flex items-center gap-1"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                        {onDeletePatrol && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setPatrolPendingDelete(p);
+                            }}
+                            aria-label={`Delete patrol ${p.patrolCode}`}
+                            className="px-2 py-1 bg-red-950/70 hover:bg-red-900/70 border border-red-800/50 text-red-300 rounded text-[11px] inline-flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -789,7 +894,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: PLAN NEW PATROL */}
+      {/* MODAL: CREATE OR EDIT PATROL */}
       {isPlanModalOpen && (
         <div
           role="dialog"
@@ -801,10 +906,12 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
             <div className="bg-slate-950 px-6 py-4 border-b border-slate-800 flex items-center justify-between text-white">
               <div>
                 <span className="text-emerald-400 font-mono text-xs uppercase font-bold">
-                  Field Operations • Directive Form P-01
+                  {editingPatrol
+                    ? `Edit Deployment • ${editingPatrol.patrolCode}`
+                    : 'Field Operations • Directive Form P-01'}
                 </span>
                 <h3 id="patrol-form-modal-title" className="text-base font-bold">
-                  Schedule New Patrol Squad
+                  {editingPatrol ? 'Edit Patrol Operation' : 'Schedule New Patrol Squad'}
                 </h3>
               </div>
               <button
@@ -819,7 +926,7 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
             </div>
 
             <form
-              onSubmit={handleCreateSubmit}
+              onSubmit={handleSavePatrolSubmit}
               noValidate
               className="p-6 space-y-4 text-xs text-slate-300 max-h-[80vh] overflow-y-auto"
             >
@@ -1011,12 +1118,12 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
 
                 <div>
                   <label htmlFor="patrol-window-input" className="block font-bold text-slate-200 mb-1">
-                    Operating Window *
+                    Scheduled Date & Operating Window *
                   </label>
                   <input
                     id="patrol-window-input"
                     type="text"
-                    placeholder="e.g. 20:00 - 04:00 IST (Night Shift)"
+                    placeholder="e.g. 2026-11-19 • 20:00 - 04:00 IST"
                     value={formData.scheduledWindow}
                     onChange={(e) =>
                       setFormData({ ...formData, scheduledWindow: e.target.value })
@@ -1177,10 +1284,94 @@ export const PatrolOperationsView: React.FC<PatrolOperationsViewProps> = ({
                   disabled={isSubmitting}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg transition disabled:opacity-60"
                 >
-                  {isSubmitting ? 'Saving to Database...' : 'Schedule Patrol Operation'}
+                  {isSubmitting
+                    ? 'Saving to Database...'
+                    : editingPatrol
+                    ? 'Save Patrol Changes'
+                    : 'Schedule Patrol Operation'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: DELETE CONFIRMATION DIALOG */}
+      {patrolPendingDelete && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="patrol-delete-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs"
+        >
+          <div className="bg-slate-900 border border-red-900/60 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+            <div className="bg-slate-950 border-b border-slate-800 px-5 py-4 flex items-center justify-between">
+              <div>
+                <span className="text-red-400 font-mono text-[11px] uppercase font-bold">
+                  Confirm Deletion
+                </span>
+                <h3 id="patrol-delete-dialog-title" className="text-sm font-bold text-white mt-0.5">
+                  Delete Patrol Operation?
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPatrolPendingDelete(null)}
+                aria-label="Cancel patrol deletion"
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3 text-xs text-slate-300">
+              {deleteError && (
+                <div
+                  role="alert"
+                  className="bg-red-950/80 border border-red-700/70 text-red-200 px-3 py-2 rounded-lg flex items-center gap-2 font-semibold"
+                >
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>{deleteError}</span>
+                </div>
+              )}
+
+              <p className="text-slate-300 leading-relaxed">
+                This will permanently remove the following patrol operation from the PostgreSQL/PostGIS database:
+              </p>
+
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1">
+                <div className="font-mono text-emerald-300 font-bold">
+                  {patrolPendingDelete.patrolCode}
+                </div>
+                <div className="font-bold text-white">{patrolPendingDelete.teamName}</div>
+                <div className="text-slate-400">
+                  {patrolPendingDelete.sector} • {patrolPendingDelete.targetArea}
+                </div>
+                <div className="text-slate-400 font-mono">
+                  Lead: {patrolPendingDelete.leadOfficer}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-slate-950 border-t border-slate-800 px-5 py-3 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPatrolPendingDelete(null)}
+                className="px-4 py-1.5 border border-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:bg-slate-800 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={handleConfirmDeletePatrol}
+                className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold transition disabled:opacity-60"
+              >
+                {isDeleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

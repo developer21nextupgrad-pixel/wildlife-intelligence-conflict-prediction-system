@@ -12,10 +12,11 @@ import {
   Download,
   FileSpreadsheet,
   X,
-  Check,
+  CheckCircle2,
   AlertCircle,
   Camera,
   RotateCcw,
+  Pencil,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
 import { DIVISION_OPTIONS, validateIncidentInput } from '../utils/wicpsFilters';
@@ -31,6 +32,8 @@ interface IncidentFormState {
   incidentType: IncidentType | '';
   severity: IncidentSeverity | '';
   humanInjury: Incident['humanInjury'] | '';
+  humanInjuriesCount: string;
+  livestockLossCount: string;
   cropDamageEstimatedAcres: string;
   cropType: string;
   description: string;
@@ -53,6 +56,8 @@ function buildEmptyIncidentForm(): IncidentFormState {
     incidentType: '',
     severity: '',
     humanInjury: '',
+    humanInjuriesCount: '',
+    livestockLossCount: '',
     cropDamageEstimatedAcres: '',
     cropType: '',
     description: '',
@@ -61,6 +66,39 @@ function buildEmptyIncidentForm(): IncidentFormState {
     reportedBy: '',
     assignedOfficer: '',
     actionTaken: '',
+  };
+}
+
+function toDatetimeLocalValue(iso: string): string {
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) return '';
+  const d = new Date(parsed);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function buildFormFromIncident(incident: Incident): IncidentFormState {
+  return {
+    species: incident.species,
+    dateTime: toDatetimeLocalValue(incident.dateTime),
+    latitude: String(incident.latitude),
+    longitude: String(incident.longitude),
+    village: incident.village,
+    district: incident.district || '',
+    forestRange: incident.forestRange,
+    incidentType: incident.incidentType,
+    severity: incident.severity,
+    humanInjury: incident.humanInjury,
+    humanInjuriesCount: String(incident.humanInjuriesCount ?? 0),
+    livestockLossCount: String(incident.livestockLossCount ?? 0),
+    cropDamageEstimatedAcres: String(incident.cropDamageEstimatedAcres ?? 0),
+    cropType: incident.cropType || '',
+    description: incident.description,
+    imageUrl: incident.imageUrl || '',
+    status: incident.status,
+    reportedBy: incident.reportedBy,
+    assignedOfficer: incident.assignedOfficer || '',
+    actionTaken: incident.actionTaken || '',
   };
 }
 
@@ -73,6 +111,10 @@ interface IncidentManagementViewProps {
   globalSearchQuery?: string;
   onGlobalSearchChange?: (query: string) => void;
   onAddIncident: (incident: Omit<Incident, 'id' | 'incidentCode'>) => Promise<void>;
+  onUpdateIncident?: (
+    id: string,
+    updates: Partial<Omit<Incident, 'id' | 'incidentCode'>>
+  ) => Promise<void>;
   onUpdateStatus: (id: string, status: IncidentStatus, officer?: string) => Promise<void>;
   onDeleteIncident?: (id: string) => Promise<void>;
   isApiLoading?: boolean;
@@ -91,6 +133,7 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
   globalSearchQuery = '',
   onGlobalSearchChange,
   onAddIncident,
+  onUpdateIncident,
   onUpdateStatus,
   onDeleteIncident,
   isApiLoading = false,
@@ -110,28 +153,31 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
     setSearchTerm(globalSearchQuery);
   }, [globalSearchQuery]);
 
-  // Selected incident for detail view
+  // Selected incident for detail view / edit mode
   const [viewIncident, setViewIncident] = useState<Incident | null>(null);
+  const [editingIncident, setEditingIncident] = useState<Incident | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [docketError, setDocketError] = useState<string | null>(null);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   // Form State
   const [formData, setFormData] = useState<IncidentFormState>(buildEmptyIncidentForm);
 
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitSuccess, setSubmitSuccess] = useState(false);
 
   useEffect(() => {
-    if (isModalOpen) {
+    if (isModalOpen && !editingIncident) {
       setFormData(buildEmptyIncidentForm());
       setFormErrors({});
       setFormError(null);
-      setSubmitSuccess(false);
     }
-  }, [isModalOpen]);
+  }, [isModalOpen, editingIncident]);
 
   const handleSearchInputChange = (val: string) => {
     setSearchTerm(val);
@@ -159,6 +205,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
       formData.cropDamageEstimatedAcres.trim() === ''
         ? 0
         : Number.parseFloat(formData.cropDamageEstimatedAcres);
+    const injuriesCountNum =
+      formData.humanInjuriesCount.trim() === '' ? 0 : Number(formData.humanInjuriesCount);
+    const livestockCountNum =
+      formData.livestockLossCount.trim() === '' ? 0 : Number(formData.livestockLossCount);
 
     const errors = validateIncidentInput({
       species: formData.species,
@@ -169,6 +219,8 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
       district: formData.district,
       forestRange: formData.forestRange,
       humanInjury: formData.humanInjury,
+      humanInjuriesCount: injuriesCountNum,
+      livestockLossCount: livestockCountNum,
       status: formData.status,
       reportedBy: formData.reportedBy,
       description: formData.description,
@@ -185,13 +237,32 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
     return true;
   };
 
-  const handleCloseModal = () => {
-    if (isSubmitting) return;
-    setIsModalOpen(false);
+  const openCreateModal = () => {
+    setEditingIncident(null);
     setFormData(buildEmptyIncidentForm());
     setFormErrors({});
     setFormError(null);
-    setSubmitSuccess(false);
+    setIsModalOpen(true);
+  };
+
+  const openEditModal = (incident: Incident) => {
+    setViewIncident(null);
+    setConfirmDeleteId(null);
+    setDocketError(null);
+    setEditingIncident(incident);
+    setFormData(buildFormFromIncident(incident));
+    setFormErrors({});
+    setFormError(null);
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    if (isSubmitting) return;
+    setIsModalOpen(false);
+    setEditingIncident(null);
+    setFormData(buildEmptyIncidentForm());
+    setFormErrors({});
+    setFormError(null);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -204,6 +275,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
       formData.cropDamageEstimatedAcres.trim() === ''
         ? 0
         : Number.parseFloat(formData.cropDamageEstimatedAcres);
+    const injuriesCountNum =
+      formData.humanInjuriesCount.trim() === '' ? 0 : Number(formData.humanInjuriesCount);
+    const livestockCountNum =
+      formData.livestockLossCount.trim() === '' ? 0 : Number(formData.livestockLossCount);
 
     const payload: Omit<Incident, 'id' | 'incidentCode'> = {
       species: formData.species as SpeciesType,
@@ -216,8 +291,8 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
       incidentType: formData.incidentType as IncidentType,
       severity: formData.severity as IncidentSeverity,
       humanInjury: formData.humanInjury as Incident['humanInjury'],
-      humanInjuriesCount: 0,
-      livestockLossCount: 0,
+      humanInjuriesCount: injuriesCountNum,
+      livestockLossCount: livestockCountNum,
       cropDamageEstimatedAcres: cropAcresNum,
       cropType: formData.cropType.trim() || undefined,
       description: formData.description.trim(),
@@ -231,23 +306,32 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
     try {
       setIsSubmitting(true);
       setFormError(null);
-      await onAddIncident(payload);
-      setSubmitSuccess(true);
-      setTimeout(() => {
-        setIsSubmitting(false);
-        setSubmitSuccess(false);
-        setIsModalOpen(false);
-        setFormErrors({});
-        setFormError(null);
-        setFormData(buildEmptyIncidentForm());
-      }, 450);
+      if (editingIncident && onUpdateIncident) {
+        await onUpdateIncident(editingIncident.id, payload);
+        setActionFeedback({
+          type: 'success',
+          message: `Incident ${editingIncident.incidentCode} updated in PostgreSQL/PostGIS database.`,
+        });
+      } else {
+        await onAddIncident(payload);
+        setActionFeedback({
+          type: 'success',
+          message: 'Incident record persisted to PostgreSQL/PostGIS database.',
+        });
+      }
+      setIsModalOpen(false);
+      setEditingIncident(null);
+      setFormErrors({});
+      setFormError(null);
+      setFormData(buildEmptyIncidentForm());
     } catch (err) {
-      setIsSubmitting(false);
       setFormError(
         err instanceof Error
           ? err.message
           : 'Failed to save incident record to backend API. Your form inputs have been preserved.'
       );
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -321,13 +405,8 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
             <span>Export CSV</span>
           </button>
           <button
-            onClick={() => {
-              setFormData(buildEmptyIncidentForm());
-              setFormError(null);
-              setFormErrors({});
-              setSubmitSuccess(false);
-              setIsModalOpen(true);
-            }}
+            type="button"
+            onClick={openCreateModal}
             className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold px-3.5 py-2 rounded-lg shadow-sm transition border border-emerald-400/30"
           >
             <Plus className="w-4 h-4" />
@@ -335,6 +414,35 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Action Feedback Banner */}
+      {actionFeedback && (
+        <div
+          role={actionFeedback.type === 'error' ? 'alert' : 'status'}
+          className={`px-4 py-3 rounded-xl flex items-center justify-between gap-2 text-xs font-semibold border ${
+            actionFeedback.type === 'success'
+              ? 'bg-emerald-950/80 border-emerald-700/70 text-emerald-200'
+              : 'bg-red-950/80 border-red-700/70 text-red-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {actionFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            )}
+            <span>{actionFeedback.message}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionFeedback(null)}
+            aria-label="Dismiss notification"
+            className="opacity-75 hover:opacity-100 p-0.5"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Global filter notice when global division/date filter hides records */}
       {isGloballyFiltered && (
@@ -544,16 +652,30 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right">
-                      <button
-                        onClick={() => {
-                          setDocketError(null);
-                          setConfirmDeleteId(null);
-                          setViewIncident(incident);
-                        }}
-                        className="bg-emerald-950 hover:bg-emerald-900 text-emerald-300 font-semibold px-2.5 py-1 rounded border border-emerald-800/60 transition"
-                      >
-                        View / Edit
-                      </button>
+                      <div className="inline-flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDocketError(null);
+                            setConfirmDeleteId(null);
+                            setViewIncident(incident);
+                          }}
+                          className="bg-emerald-950 hover:bg-emerald-900 text-emerald-300 font-semibold px-2.5 py-1 rounded border border-emerald-800/60 transition"
+                        >
+                          View Details
+                        </button>
+                        {onUpdateIncident && (
+                          <button
+                            type="button"
+                            onClick={() => openEditModal(incident)}
+                            aria-label={`Edit incident ${incident.incidentCode}`}
+                            className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold px-2.5 py-1 rounded border border-slate-700 transition inline-flex items-center gap-1"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -563,17 +685,28 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
         </div>
       </div>
 
-      {/* MODAL 1: RECORD NEW INCIDENT FORM */}
+      {/* MODAL 1: CREATE OR EDIT INCIDENT FORM */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs overflow-y-auto">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="incident-form-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs overflow-y-auto"
+        >
           <div className="bg-slate-900 rounded-2xl shadow-2xl border border-slate-800 w-full max-w-2xl my-8 overflow-hidden animate-in fade-in zoom-in-95">
             {/* Modal Header */}
             <div className="bg-slate-950 border-b border-slate-800 text-white px-6 py-4 flex items-center justify-between">
               <div>
                 <span className="text-emerald-400 font-mono text-xs uppercase font-bold tracking-wider">
-                  Field Logging Desk • Form WICPS-1A
+                  {editingIncident
+                    ? `Edit Docket • ${editingIncident.incidentCode}`
+                    : 'Field Logging Desk • Form WICPS-1A'}
                 </span>
-                <h3 className="text-lg font-bold">Record Human-Wildlife Incident</h3>
+                <h3 id="incident-form-modal-title" className="text-lg font-bold">
+                  {editingIncident
+                    ? 'Edit Human-Wildlife Incident'
+                    : 'Record Human-Wildlife Incident'}
+                </h3>
               </div>
               <button
                 type="button"
@@ -896,6 +1029,66 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                     </span>
                   )}
                 </div>
+
+                {/* Human Injuries Count (Optional) */}
+                <div>
+                  <label htmlFor="incident-injuries-count-input" className="block font-bold text-slate-200 mb-1">
+                    Human Injuries Count (Optional)
+                  </label>
+                  <input
+                    id="incident-injuries-count-input"
+                    type="number"
+                    min="0"
+                    max="1000"
+                    step="1"
+                    placeholder="e.g. 0"
+                    value={formData.humanInjuriesCount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        humanInjuriesCount: e.target.value,
+                      })
+                    }
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.humanInjuriesCount ? 'border-red-500' : 'border-slate-700'
+                    }`}
+                  />
+                  {formErrors.humanInjuriesCount && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.humanInjuriesCount}
+                    </span>
+                  )}
+                </div>
+
+                {/* Livestock Loss Count (Optional) */}
+                <div>
+                  <label htmlFor="incident-livestock-count-input" className="block font-bold text-slate-200 mb-1">
+                    Livestock Loss Count (Optional)
+                  </label>
+                  <input
+                    id="incident-livestock-count-input"
+                    type="number"
+                    min="0"
+                    max="10000"
+                    step="1"
+                    placeholder="e.g. 0"
+                    value={formData.livestockLossCount}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        livestockLossCount: e.target.value,
+                      })
+                    }
+                    className={`w-full bg-slate-950 border rounded-lg p-2 font-mono text-slate-100 placeholder-slate-500 focus:ring-1 focus:ring-emerald-500 focus:outline-hidden ${
+                      formErrors.livestockLossCount ? 'border-red-500' : 'border-slate-700'
+                    }`}
+                  />
+                  {formErrors.livestockLossCount && (
+                    <span className="text-red-400 text-[11px] mt-0.5 block">
+                      {formErrors.livestockLossCount}
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Description */}
@@ -1021,18 +1214,15 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold shadow-sm transition flex items-center gap-2"
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold shadow-sm transition flex items-center gap-2 disabled:opacity-60"
                 >
-                  {isSubmitting ? (
-                    <span>Registering...</span>
-                  ) : submitSuccess ? (
-                    <>
-                      <Check className="w-4 h-4" />
-                      <span>Registered!</span>
-                    </>
-                  ) : (
-                    <span>Submit Incident Record</span>
-                  )}
+                  {isSubmitting
+                    ? editingIncident
+                      ? 'Saving Changes...'
+                      : 'Registering...'
+                    : editingIncident
+                    ? 'Save Incident Changes'
+                    : 'Submit Incident Record'}
                 </button>
               </div>
             </form>
@@ -1088,15 +1278,21 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                 </div>
                 <div>
                   <span className="text-slate-400 text-[10px] uppercase font-bold">
-                    Reported By
+                    Reported By & Officer
                   </span>
                   <div className="font-semibold text-slate-200">{viewIncident.reportedBy}</div>
+                  {viewIncident.assignedOfficer && (
+                    <div className="text-emerald-300 text-[11px]">{viewIncident.assignedOfficer}</div>
+                  )}
                 </div>
                 <div>
                   <span className="text-slate-400 text-[10px] uppercase font-bold">
-                    Current Status
+                    Impact & Current Status
                   </span>
                   <div className="font-bold text-emerald-400">{viewIncident.status}</div>
+                  <div className="text-slate-400 text-[11px] font-mono">
+                    Injuries: {viewIncident.humanInjuriesCount} • Livestock: {viewIncident.livestockLossCount} • Crop: {viewIncident.cropDamageEstimatedAcres} ac
+                  </div>
                 </div>
               </div>
 
@@ -1162,7 +1358,7 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
               </div>
             </div>
 
-            <div className="px-6 py-3 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-2">
+            <div className="px-6 py-3 bg-slate-950 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
               {onDeleteIncident ? (
                 confirmDeleteId === viewIncident.id ? (
                   <div className="flex items-center gap-2">
@@ -1179,6 +1375,10 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                           await onDeleteIncident(viewIncident.id);
                           setConfirmDeleteId(null);
                           setViewIncident(null);
+                          setActionFeedback({
+                            type: 'success',
+                            message: `Incident ${viewIncident.incidentCode} deleted from database.`,
+                          });
                         } catch (err) {
                           setDocketError(
                             err instanceof Error ? err.message : 'Failed to delete incident.'
@@ -1212,12 +1412,24 @@ export const IncidentManagementView: React.FC<IncidentManagementViewProps> = ({
                 <span />
               )}
 
-              <button
-                onClick={() => setViewIncident(null)}
-                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg text-xs transition"
-              >
-                Close Docket
-              </button>
+              <div className="flex items-center gap-2">
+                {onUpdateIncident && (
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(viewIncident)}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs transition inline-flex items-center gap-1.5"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span>Edit Record</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setViewIncident(null)}
+                  className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded-lg text-xs transition"
+                >
+                  Close Docket
+                </button>
+              </div>
             </div>
           </div>
         </div>

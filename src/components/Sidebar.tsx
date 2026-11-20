@@ -12,7 +12,8 @@ import {
   Settings,
   TreePine,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Thermometer
 } from 'lucide-react';
 
 export interface NavItem {
@@ -118,6 +119,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       tooltipText: 'Analytics & Intelligence Reports',
     },
     {
+      id: 'thermal-ingestion',
+      name: 'Thermal Ingestion',
+      icon: Thermometer,
+      badge: 'Stage 1',
+      badgeColor: 'bg-amber-950 text-amber-300 border border-amber-800/60 font-mono',
+      tooltipText: 'Thermal Camera Ingestion & Frame QC (Stage 1)',
+    },
+    {
       id: 'administration',
       name: 'Administration',
       icon: Settings,
@@ -136,6 +145,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     if (tab === 'alerts') return 'alert-management';
     if (tab === 'patrols') return 'patrol-operations';
     if (tab === 'analytics') return 'analytics-reports';
+    if (tab === 'thermal' || tab === 'ingestion') return 'thermal-ingestion';
     if (tab === 'settings' || tab === 'users') return 'administration';
     return tab;
   };

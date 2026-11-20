@@ -1,6 +1,10 @@
 import express, { Request, Response } from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
+import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 
@@ -11,6 +15,11 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const API_PREFIX = (process.env.API_V1_PREFIX || '/api/v1').replace(/\/+$/, '');
+const FASTAPI_SIDECAR_HOST = process.env.FASTAPI_SIDECAR_HOST || '127.0.0.1';
+const FASTAPI_SIDECAR_PORT = Number(process.env.FASTAPI_SIDECAR_PORT || 8001);
+const FASTAPI_SIDECAR_URL =
+  process.env.FASTAPI_SIDECAR_URL || `http://${FASTAPI_SIDECAR_HOST}:${FASTAPI_SIDECAR_PORT}`;
+let fastApiProcess: ChildProcess | null = null;
 
 // --- Domain Types (snake_case DTOs matching FastAPI backend) ---
 interface VillageRecord {
@@ -1197,18 +1206,85 @@ function alertToGeoJSON(a: AlertRecord) {
 
 // --- Express App & API Router ---
 const app = express();
-app.use(express.json({ limit: '2mb' }));
 
-// CORS headers for flexibility
+// CORS headers (mounted before proxy and JSON parser so OPTIONS and X-Camera-Key pass cleanly)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Camera-Key');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
   next();
 });
+
+// Raw streaming proxy to FastAPI sidecar for Phase 1 Thermal Cameras & Ingestion.
+// In production, Vercel/Node should call the standalone Render FastAPI service directly via VITE_API_BASE_URL
+// (unless FASTAPI_SIDECAR_URL is explicitly configured).
+// Mounted BEFORE express.json() so multipart/form-data (images/video) and raw payloads stream untouched.
+app.use([`${API_PREFIX}/cameras`, `${API_PREFIX}/ingest`], (req: Request, res: Response) => {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    !process.env.FASTAPI_SIDECAR_URL &&
+    process.env.WICPS_ENABLE_FASTAPI_SIDECAR !== 'true'
+  ) {
+    return res.status(503).json({
+      detail:
+        'Production thermal ingestion requires the standalone Render FastAPI backend (set VITE_API_BASE_URL on Vercel or FASTAPI_SIDECAR_URL). Local SQLite/filesystem sidecar is disabled in production.',
+    });
+  }
+
+  const targetUrl = new URL(req.originalUrl, FASTAPI_SIDECAR_URL);
+  const forwardHeaders: http.OutgoingHttpHeaders = {
+    host: targetUrl.host,
+  };
+  for (const [key, value] of Object.entries(req.headers)) {
+    const lower = key.toLowerCase();
+    if (value !== undefined && lower !== 'host' && lower !== 'connection') {
+      forwardHeaders[key] = value;
+    }
+  }
+
+  const proxyReq = http.request(
+    {
+      protocol: targetUrl.protocol,
+      hostname: targetUrl.hostname,
+      port: targetUrl.port,
+      method: req.method,
+      path: `${targetUrl.pathname}${targetUrl.search}`,
+      headers: forwardHeaders,
+    },
+    (proxyRes) => {
+      res.status(proxyRes.statusCode || 502);
+      for (const [k, v] of Object.entries(proxyRes.headers)) {
+        const lower = k.toLowerCase();
+        if (
+          v !== undefined &&
+          lower !== 'transfer-encoding' &&
+          lower !== 'connection' &&
+          lower !== 'keep-alive'
+        ) {
+          res.setHeader(k, v);
+        }
+      }
+      proxyRes.pipe(res, { end: true });
+    }
+  );
+
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) {
+      res.status(503).json({
+        detail: `FastAPI Thermal Ingestion service unavailable at ${FASTAPI_SIDECAR_URL}: ${err.message}`,
+      });
+    } else {
+      res.end();
+    }
+  });
+
+  req.pipe(proxyReq, { end: true });
+});
+
+app.use(express.json({ limit: '2mb' }));
 
 const api = express.Router();
 
@@ -1304,6 +1380,59 @@ function validateCoordPair(latRaw: unknown, lngRaw: unknown): { lat: number; lng
   return { lat, lng };
 }
 
+function resolveVillageId(
+  explicitVillageId: unknown,
+  ...candidateTexts: unknown[]
+): { villageId: string | null; error?: string } {
+  if (typeof explicitVillageId === 'string' && explicitVillageId.trim()) {
+    const trimmed = explicitVillageId.trim();
+    const matched = store.villages.find((v) => v.id === trimmed);
+    if (!matched) {
+      return { villageId: null, error: 'Referenced village_id does not exist.' };
+    }
+    return { villageId: matched.id };
+  }
+
+  const texts = candidateTexts
+    .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+    .map((t) => t.trim().toLowerCase());
+  if (texts.length === 0) return { villageId: null };
+
+  for (const text of texts) {
+    const exact = store.villages.find((v) => v.name.trim().toLowerCase() === text);
+    if (exact) return { villageId: exact.id };
+  }
+
+  const sortedVillages = [...store.villages].sort((a, b) => b.name.length - a.name.length);
+  for (const text of texts) {
+    const contained = sortedVillages.find((v) => text.includes(v.name.trim().toLowerCase()));
+    if (contained) return { villageId: contained.id };
+  }
+
+  for (const text of texts) {
+    const tokens = new Set(text.match(/[a-z0-9]+/g) ?? []);
+    const tokenMatch = sortedVillages.find((v) => {
+      const firstToken = (v.name.toLowerCase().match(/[a-z0-9]+/g) ?? [])[0];
+      return Boolean(firstToken && firstToken.length >= 4 && tokens.has(firstToken));
+    });
+    if (tokenMatch) return { villageId: tokenMatch.id };
+  }
+
+  for (const text of texts) {
+    const rangeMatches = store.villages.filter(
+      (v) =>
+        v.forest_range.trim() &&
+        (v.forest_range.trim().toLowerCase() === text ||
+          text.includes(v.forest_range.trim().toLowerCase()))
+    );
+    if (rangeMatches.length === 1) {
+      return { villageId: rangeMatches[0].id };
+    }
+  }
+
+  return { villageId: null };
+}
+
 api.post('/incidents', (req: Request, res: Response) => {
   const body = req.body ?? {};
   const errors: string[] = [];
@@ -1331,14 +1460,27 @@ api.post('/incidents', (req: Request, res: Response) => {
   if (!Number.isFinite(cropAcres) || cropAcres < 0) {
     errors.push('crop_damage_estimated_acres must be 0 or greater.');
   }
+  const injuriesCount =
+    body.human_injuries_count === undefined || body.human_injuries_count === null
+      ? 0
+      : Number(body.human_injuries_count);
+  if (!Number.isInteger(injuriesCount) || injuriesCount < 0 || injuriesCount > 1000) {
+    errors.push('human_injuries_count must be an integer between 0 and 1000.');
+  }
+  const livestockCount =
+    body.livestock_loss_count === undefined || body.livestock_loss_count === null
+      ? 0
+      : Number(body.livestock_loss_count);
+  if (!Number.isInteger(livestockCount) || livestockCount < 0 || livestockCount > 10000) {
+    errors.push('livestock_loss_count must be an integer between 0 and 10000.');
+  }
+  const fk = resolveVillageId(body.village_id, body.village);
+  if (fk.error) errors.push(fk.error);
   if (errors.length > 0) {
     return res.status(422).json({ detail: errors.join(' ') });
   }
 
   const now = new Date().toISOString();
-  const matchedVillage = store.villages.find(
-    (v) => v.name.toLowerCase() === String(body.village).trim().toLowerCase()
-  );
   const code =
     typeof body.incident_code === 'string' && body.incident_code.trim()
       ? body.incident_code.trim()
@@ -1351,23 +1493,27 @@ api.post('/incidents', (req: Request, res: Response) => {
     date_time: typeof body.date_time === 'string' && body.date_time.trim() ? body.date_time.trim() : now,
     latitude: coords.lat,
     longitude: coords.lng,
-    village_id: body.village_id ?? matchedVillage?.id ?? null,
+    village_id: fk.villageId,
     village: String(body.village).trim(),
     district: String(body.district).trim(),
     forest_range: String(body.forest_range).trim(),
     incident_type: String(body.incident_type).trim(),
     severity: String(body.severity).trim(),
     human_injury: String(body.human_injury).trim(),
-    human_injuries_count: Number(body.human_injuries_count) || 0,
-    livestock_loss_count: Number(body.livestock_loss_count) || 0,
+    human_injuries_count: injuriesCount,
+    livestock_loss_count: livestockCount,
     crop_damage_estimated_acres: cropAcres,
-    crop_type: body.crop_type || null,
+    crop_type: typeof body.crop_type === 'string' && body.crop_type.trim() ? body.crop_type.trim() : null,
     description: String(body.description).trim(),
-    image_url: body.image_url || null,
+    image_url: typeof body.image_url === 'string' && body.image_url.trim() ? body.image_url.trim() : null,
     status: String(body.status).trim(),
     reported_by: String(body.reported_by).trim(),
-    assigned_officer: body.assigned_officer || null,
-    action_taken: body.action_taken || null,
+    assigned_officer:
+      typeof body.assigned_officer === 'string' && body.assigned_officer.trim()
+        ? body.assigned_officer.trim()
+        : null,
+    action_taken:
+      typeof body.action_taken === 'string' && body.action_taken.trim() ? body.action_taken.trim() : null,
     is_demo: false,
     created_at: now,
     updated_at: now,
@@ -1379,10 +1525,145 @@ api.post('/incidents', (req: Request, res: Response) => {
 api.put('/incidents/:id', (req: Request, res: Response) => {
   const idx = store.incidents.findIndex((i) => i.id === req.params.id);
   if (idx === -1) return res.status(404).json({ detail: 'Incident not found.' });
+  const prev = store.incidents[idx];
+  const updates = req.body ?? {};
+  const errors: string[] = [];
+
+  for (const key of [
+    'species',
+    'village',
+    'district',
+    'forest_range',
+    'incident_type',
+    'severity',
+    'human_injury',
+    'status',
+    'reported_by',
+    'description',
+  ] as const) {
+    if (updates[key] !== undefined) {
+      const err = requireNonEmptyString(updates[key], key);
+      if (err) errors.push(err);
+    }
+  }
+
+  let nextLat = prev.latitude;
+  let nextLng = prev.longitude;
+  if (updates.latitude !== undefined || updates.longitude !== undefined) {
+    const coords = validateCoordPair(
+      updates.latitude !== undefined ? updates.latitude : prev.latitude,
+      updates.longitude !== undefined ? updates.longitude : prev.longitude
+    );
+    if (coords.error) errors.push(coords.error);
+    nextLat = coords.lat;
+    nextLng = coords.lng;
+  }
+
+  let nextCrop = prev.crop_damage_estimated_acres;
+  if (updates.crop_damage_estimated_acres !== undefined) {
+    const cropVal = Number(updates.crop_damage_estimated_acres);
+    if (!Number.isFinite(cropVal) || cropVal < 0) {
+      errors.push('crop_damage_estimated_acres must be 0 or greater.');
+    } else {
+      nextCrop = cropVal;
+    }
+  }
+
+  let nextInjuries = prev.human_injuries_count;
+  if (updates.human_injuries_count !== undefined) {
+    const val = Number(updates.human_injuries_count);
+    if (!Number.isInteger(val) || val < 0 || val > 1000) {
+      errors.push('human_injuries_count must be an integer between 0 and 1000.');
+    } else {
+      nextInjuries = val;
+    }
+  }
+
+  let nextLivestock = prev.livestock_loss_count;
+  if (updates.livestock_loss_count !== undefined) {
+    const val = Number(updates.livestock_loss_count);
+    if (!Number.isInteger(val) || val < 0 || val > 10000) {
+      errors.push('livestock_loss_count must be an integer between 0 and 10000.');
+    } else {
+      nextLivestock = val;
+    }
+  }
+
+  const nextVillage =
+    updates.village !== undefined ? String(updates.village).trim() : prev.village;
+  let nextVillageId = prev.village_id;
+  if ('village_id' in updates) {
+    if (updates.village_id !== null && updates.village_id !== undefined) {
+      const fk = resolveVillageId(updates.village_id);
+      if (fk.error) errors.push(fk.error);
+      nextVillageId = fk.villageId;
+    } else if (updates.village !== undefined) {
+      nextVillageId = resolveVillageId(null, nextVillage).villageId;
+    } else {
+      nextVillageId = null;
+    }
+  } else if (updates.village !== undefined) {
+    nextVillageId = resolveVillageId(null, nextVillage).villageId;
+  }
+
+  if (errors.length > 0) {
+    return res.status(422).json({ detail: errors.join(' ') });
+  }
+
   const updated: IncidentRecord = {
-    ...store.incidents[idx],
-    ...req.body,
-    id: store.incidents[idx].id,
+    ...prev,
+    species: updates.species !== undefined ? String(updates.species).trim() : prev.species,
+    date_time:
+      typeof updates.date_time === 'string' && updates.date_time.trim()
+        ? updates.date_time.trim()
+        : prev.date_time,
+    latitude: nextLat,
+    longitude: nextLng,
+    village_id: nextVillageId,
+    village: nextVillage,
+    district: updates.district !== undefined ? String(updates.district).trim() : prev.district,
+    forest_range:
+      updates.forest_range !== undefined ? String(updates.forest_range).trim() : prev.forest_range,
+    incident_type:
+      updates.incident_type !== undefined
+        ? String(updates.incident_type).trim()
+        : prev.incident_type,
+    severity: updates.severity !== undefined ? String(updates.severity).trim() : prev.severity,
+    human_injury:
+      updates.human_injury !== undefined ? String(updates.human_injury).trim() : prev.human_injury,
+    human_injuries_count: nextInjuries,
+    livestock_loss_count: nextLivestock,
+    crop_damage_estimated_acres: nextCrop,
+    crop_type:
+      updates.crop_type !== undefined
+        ? typeof updates.crop_type === 'string' && updates.crop_type.trim()
+          ? updates.crop_type.trim()
+          : null
+        : prev.crop_type,
+    description:
+      updates.description !== undefined ? String(updates.description).trim() : prev.description,
+    image_url:
+      updates.image_url !== undefined
+        ? typeof updates.image_url === 'string' && updates.image_url.trim()
+          ? updates.image_url.trim()
+          : null
+        : prev.image_url,
+    status: updates.status !== undefined ? String(updates.status).trim() : prev.status,
+    reported_by:
+      updates.reported_by !== undefined ? String(updates.reported_by).trim() : prev.reported_by,
+    assigned_officer:
+      updates.assigned_officer !== undefined
+        ? typeof updates.assigned_officer === 'string' && updates.assigned_officer.trim()
+          ? updates.assigned_officer.trim()
+          : null
+        : prev.assigned_officer,
+    action_taken:
+      updates.action_taken !== undefined
+        ? typeof updates.action_taken === 'string' && updates.action_taken.trim()
+          ? updates.action_taken.trim()
+          : null
+        : prev.action_taken,
+    id: prev.id,
     updated_at: new Date().toISOString(),
   };
   store.incidents[idx] = updated;
@@ -1601,9 +1882,10 @@ api.post('/alerts', (req: Request, res: Response) => {
     typeof body.triggered_at === 'string' && body.triggered_at.trim()
       ? body.triggered_at.trim()
       : now;
-  const matchedVillage = store.villages.find(
-    (v) => v.name.toLowerCase() === String(body.affected_village).trim().toLowerCase()
-  );
+  const fk = resolveVillageId(body.village_id, body.affected_village);
+  if (fk.error) {
+    return res.status(422).json({ detail: fk.error });
+  }
 
   const created: AlertRecord = {
     id: crypto.randomUUID(),
@@ -1612,7 +1894,7 @@ api.post('/alerts', (req: Request, res: Response) => {
     severity: String(body.severity).trim(),
     species: String(body.species).trim(),
     affected_village: String(body.affected_village).trim(),
-    village_id: body.village_id ?? matchedVillage?.id ?? null,
+    village_id: fk.villageId,
     district: String(body.district).trim(),
     latitude: coords.lat,
     longitude: coords.lng,
@@ -1640,6 +1922,25 @@ api.put('/alerts/:id', (req: Request, res: Response) => {
   const updates = req.body ?? {};
   const now = new Date().toISOString();
 
+  const nextAffectedVillage =
+    updates.affected_village !== undefined
+      ? String(updates.affected_village).trim()
+      : prev.affected_village;
+  let nextVillageId = prev.village_id;
+  if ('village_id' in updates) {
+    if (updates.village_id !== null && updates.village_id !== undefined) {
+      const fk = resolveVillageId(updates.village_id);
+      if (fk.error) return res.status(422).json({ detail: fk.error });
+      nextVillageId = fk.villageId;
+    } else if (updates.affected_village !== undefined) {
+      nextVillageId = resolveVillageId(null, nextAffectedVillage).villageId;
+    } else {
+      nextVillageId = null;
+    }
+  } else if (updates.affected_village !== undefined) {
+    nextVillageId = resolveVillageId(null, nextAffectedVillage).villageId;
+  }
+
   let acknowledgedAt = updates.acknowledged_at ?? prev.acknowledged_at;
   if (updates.acknowledged === true && updates.acknowledged_at === undefined) {
     acknowledgedAt = now;
@@ -1650,6 +1951,8 @@ api.put('/alerts/:id', (req: Request, res: Response) => {
   const updated: AlertRecord = {
     ...prev,
     ...updates,
+    affected_village: nextAffectedVillage,
+    village_id: nextVillageId,
     id: prev.id,
     acknowledged_at: acknowledgedAt,
     updated_at: now,
@@ -1728,6 +2031,8 @@ api.post('/patrols', (req: Request, res: Response) => {
   if (!Number.isFinite(personnel) || personnel < 1 || personnel > 200) {
     errors.push('active_personnel must be between 1 and 200.');
   }
+  const fk = resolveVillageId(body.village_id, body.target_area, body.sector);
+  if (fk.error) errors.push(fk.error);
   if (errors.length > 0) {
     return res.status(422).json({ detail: errors.join(' ') });
   }
@@ -1746,7 +2051,7 @@ api.post('/patrols', (req: Request, res: Response) => {
     target_area: String(body.target_area).trim(),
     sector: String(body.sector).trim(),
     district: String(body.district).trim(),
-    village_id: body.village_id ?? null,
+    village_id: fk.villageId,
     priority: String(body.priority).trim(),
     status: String(body.status).trim(),
     scheduled_window: String(body.scheduled_window).trim(),
@@ -1767,10 +2072,101 @@ api.post('/patrols', (req: Request, res: Response) => {
 api.put('/patrols/:id', (req: Request, res: Response) => {
   const idx = store.patrols.findIndex((p) => p.id === req.params.id);
   if (idx === -1) return res.status(404).json({ detail: 'Patrol not found.' });
+  const prev = store.patrols[idx];
+  const updates = req.body ?? {};
+  const errors: string[] = [];
+
+  for (const key of [
+    'team_name',
+    'lead_officer',
+    'target_area',
+    'sector',
+    'district',
+    'priority',
+    'status',
+    'scheduled_window',
+    'risk_rationale',
+    'approved_by',
+  ] as const) {
+    if (updates[key] !== undefined) {
+      const err = requireNonEmptyString(updates[key], key);
+      if (err) errors.push(err);
+    }
+  }
+
+  let nextLat = prev.latitude;
+  let nextLng = prev.longitude;
+  if (updates.latitude !== undefined || updates.longitude !== undefined) {
+    const coords = validateCoordPair(
+      updates.latitude !== undefined ? updates.latitude : prev.latitude,
+      updates.longitude !== undefined ? updates.longitude : prev.longitude
+    );
+    if (coords.error) errors.push(coords.error);
+    nextLat = coords.lat;
+    nextLng = coords.lng;
+  }
+
+  let nextPersonnel = prev.active_personnel;
+  if (updates.active_personnel !== undefined) {
+    const pVal = Number(updates.active_personnel);
+    if (!Number.isFinite(pVal) || pVal < 1 || pVal > 200) {
+      errors.push('active_personnel must be between 1 and 200.');
+    } else {
+      nextPersonnel = Math.round(pVal);
+    }
+  }
+
+  const nextTargetArea =
+    updates.target_area !== undefined ? String(updates.target_area).trim() : prev.target_area;
+  const nextSector = updates.sector !== undefined ? String(updates.sector).trim() : prev.sector;
+
+  let nextVillageId = prev.village_id;
+  if ('village_id' in updates) {
+    if (updates.village_id !== null && updates.village_id !== undefined) {
+      const fk = resolveVillageId(updates.village_id);
+      if (fk.error) errors.push(fk.error);
+      nextVillageId = fk.villageId;
+    } else if (updates.target_area !== undefined || updates.sector !== undefined) {
+      nextVillageId = resolveVillageId(null, nextTargetArea, nextSector).villageId;
+    } else {
+      nextVillageId = null;
+    }
+  } else if (updates.target_area !== undefined || updates.sector !== undefined) {
+    nextVillageId = resolveVillageId(null, nextTargetArea, nextSector).villageId;
+  }
+
+  if (errors.length > 0) {
+    return res.status(422).json({ detail: errors.join(' ') });
+  }
+
   const updated: PatrolRecord = {
-    ...store.patrols[idx],
-    ...req.body,
-    id: store.patrols[idx].id,
+    ...prev,
+    team_name: updates.team_name !== undefined ? String(updates.team_name).trim() : prev.team_name,
+    lead_officer:
+      updates.lead_officer !== undefined ? String(updates.lead_officer).trim() : prev.lead_officer,
+    target_area: nextTargetArea,
+    sector: nextSector,
+    district: updates.district !== undefined ? String(updates.district).trim() : prev.district,
+    village_id: nextVillageId,
+    priority: updates.priority !== undefined ? String(updates.priority).trim() : prev.priority,
+    status: updates.status !== undefined ? String(updates.status).trim() : prev.status,
+    scheduled_window:
+      updates.scheduled_window !== undefined
+        ? String(updates.scheduled_window).trim()
+        : prev.scheduled_window,
+    active_personnel: nextPersonnel,
+    equipment: Array.isArray(updates.equipment)
+      ? updates.equipment.map((e: unknown) => String(e).trim()).filter(Boolean)
+      : prev.equipment,
+    risk_rationale:
+      updates.risk_rationale !== undefined
+        ? String(updates.risk_rationale).trim()
+        : prev.risk_rationale,
+    approved_by:
+      updates.approved_by !== undefined ? String(updates.approved_by).trim() : prev.approved_by,
+    latitude: nextLat,
+    longitude: nextLng,
+    id: prev.id,
     updated_at: new Date().toISOString(),
   };
   store.patrols[idx] = updated;
@@ -1995,7 +2391,114 @@ api.get('/gis/nearby-incidents', (req: Request, res: Response) => {
 
 app.use(API_PREFIX, api);
 
+function isTcpPortOpen(host: string, port: number, timeoutMs = 300): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, timeoutMs);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function startFastApiSidecar(): Promise<void> {
+  const isProd = process.env.NODE_ENV === 'production';
+  const explicitSidecarOptIn = process.env.WICPS_ENABLE_FASTAPI_SIDECAR === 'true';
+  if (process.env.WICPS_DISABLE_FASTAPI_SIDECAR === 'true' || (isProd && !explicitSidecarOptIn)) {
+    return;
+  }
+  const backendDir = path.resolve(__dirname, 'backend');
+  const venvBinDir = path.join(backendDir, '.venv', 'bin');
+  const uvicornBin = path.join(venvBinDir, 'uvicorn');
+  const alembicBin = path.join(venvBinDir, 'alembic');
+  if (!fs.existsSync(uvicornBin)) {
+    console.warn('FastAPI sidecar skipped: backend/.venv/bin/uvicorn not found.');
+    return;
+  }
+
+  const childEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    PYTHONUNBUFFERED: '1',
+  };
+
+  if (process.env.FASTAPI_SIDECAR_DATABASE_URL) {
+    childEnv.DATABASE_URL = process.env.FASTAPI_SIDECAR_DATABASE_URL;
+  } else if (
+    !childEnv.DATABASE_URL ||
+    childEnv.DATABASE_URL.includes('@localhost:5432') ||
+    childEnv.DATABASE_URL.includes('@127.0.0.1:5432')
+  ) {
+    const pgUp = childEnv.DATABASE_URL ? await isTcpPortOpen('127.0.0.1', 5432) : false;
+    if (!pgUp) {
+      childEnv.DATABASE_URL = 'sqlite:///./wicps_dev_phase1.db';
+    }
+  }
+
+  if (!childEnv.STORAGE_BACKEND) {
+    childEnv.STORAGE_BACKEND = 'filesystem';
+  }
+  if (!childEnv.LOCAL_STORAGE_DIR) {
+    childEnv.LOCAL_STORAGE_DIR = './storage_dev';
+  }
+
+  if (fs.existsSync(alembicBin)) {
+    try {
+      execFileSync(alembicBin, ['-c', 'alembic.ini', 'upgrade', 'head'], {
+        cwd: backendDir,
+        env: childEnv,
+        stdio: 'pipe',
+      });
+    } catch (err) {
+      console.error('FastAPI sidecar Alembic migration failed:', err);
+    }
+  }
+
+  fastApiProcess = spawn(
+    uvicornBin,
+    ['app.main:app', '--host', FASTAPI_SIDECAR_HOST, '--port', String(FASTAPI_SIDECAR_PORT)],
+    {
+      cwd: backendDir,
+      env: childEnv,
+      stdio: 'inherit',
+    }
+  );
+
+  fastApiProcess.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) {
+      console.warn(`FastAPI sidecar exited (code=${code}, signal=${signal})`);
+    }
+    fastApiProcess = null;
+  });
+
+  const stopSidecar = () => {
+    if (fastApiProcess && !fastApiProcess.killed) {
+      fastApiProcess.kill('SIGTERM');
+    }
+  };
+  process.once('exit', stopSidecar);
+  process.once('SIGINT', () => {
+    stopSidecar();
+    process.exit(0);
+  });
+  process.once('SIGTERM', () => {
+    stopSidecar();
+    process.exit(0);
+  });
+}
+
 async function startServer() {
+  await startFastApiSidecar();
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -2012,7 +2515,9 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`WICPS server listening on http://0.0.0.0:${PORT} (API: ${API_PREFIX})`);
+    console.log(
+      `WICPS server listening on http://0.0.0.0:${PORT} (API: ${API_PREFIX}, FastAPI Sidecar: ${FASTAPI_SIDECAR_URL})`
+    );
   });
 }
 

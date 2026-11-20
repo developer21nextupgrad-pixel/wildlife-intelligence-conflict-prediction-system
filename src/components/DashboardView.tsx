@@ -24,6 +24,8 @@ import {
   Activity,
   Calendar,
   RotateCcw,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -62,6 +64,9 @@ interface DashboardViewProps {
   dateRange: string;
   setDateRange: (range: string) => void;
   onResetFilters?: () => void;
+  isApiLoading?: boolean;
+  apiError?: string | null;
+  onRetrySync?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -79,6 +84,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   dateRange,
   setDateRange,
   onResetFilters,
+  isApiLoading = false,
+  apiError = null,
+  onRetrySync,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -427,8 +435,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* Empty Filter Banner if active selection yields zero records */}
-      {isFilteredOut && (
+      {/* Empty Filter Banner if active selection yields zero records (only when backend is online) */}
+      {isFilteredOut && !isApiLoading && !apiError && (
         <div className="bg-slate-900 border border-amber-700/60 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2.5 text-amber-300">
             <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -621,6 +629,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           <div className="relative h-80 sm:h-96 w-full">
             <div ref={mapContainerRef} className="w-full h-full z-0" />
+
+            {villages.length === 0 && riskZones.length === 0 && isApiLoading && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-slate-950/90 border border-emerald-700/60 rounded-lg px-3 py-2 text-[11px] text-emerald-200 flex items-center gap-2 shadow-lg">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                <span>Loading GIS villages &amp; risk zones...</span>
+              </div>
+            )}
+
+            {villages.length === 0 && riskZones.length === 0 && !isApiLoading && apiError && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 bg-slate-950/95 border border-red-700/70 rounded-lg px-3 py-2 text-[11px] text-red-200 flex items-center gap-2.5 shadow-lg">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                <span>GIS layers unavailable while FastAPI bridge is offline.</span>
+                {onRetrySync && (
+                  <button
+                    type="button"
+                    onClick={onRetrySync}
+                    className="px-2 py-0.5 bg-red-700 hover:bg-red-600 text-white rounded font-semibold inline-flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Retry</span>
+                  </button>
+                )}
+              </div>
+            )}
 
             <div className="absolute bottom-3 left-3 z-10 bg-slate-950/90 backdrop-blur-xs border border-slate-800 rounded-lg p-2.5 text-[11px] text-slate-300 space-y-1">
               <div className="font-bold text-white flex items-center gap-1.5">
@@ -829,9 +861,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           <div className="h-60 w-full flex items-center justify-center">
             {villages.length === 0 ? (
-              <div className="text-xs text-slate-400 text-center px-4">
-                No villages match the selected division filter.
-              </div>
+              isApiLoading ? (
+                <div className="text-xs text-slate-300 flex items-center gap-2 px-4">
+                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                  <span>Loading village risk index from backend API...</span>
+                </div>
+              ) : apiError ? (
+                <div className="text-xs text-red-300 text-center px-4 space-y-2">
+                  <div>Unable to load village risk profiles from FastAPI ({apiError}).</div>
+                  {onRetrySync && (
+                    <button
+                      type="button"
+                      onClick={onRetrySync}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-800/80 hover:bg-red-700 text-white rounded font-semibold"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Retry Sync</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-400 text-center px-4">
+                  No villages match the selected division filter.
+                </div>
+              )
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
@@ -889,9 +942,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             {villages.length === 0 ? (
-              <div className="py-10 text-center text-xs text-slate-400">
-                No vulnerable settlements match the selected division filter.
-              </div>
+              isApiLoading ? (
+                <div className="py-10 text-center text-xs text-slate-300 flex items-center justify-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                  <span>Loading vulnerable settlements from FastAPI...</span>
+                </div>
+              ) : apiError ? (
+                <div className="py-8 text-center text-xs text-red-300 space-y-2">
+                  <div>Settlement risk records unavailable while FastAPI bridge is offline.</div>
+                  {onRetrySync && (
+                    <button
+                      type="button"
+                      onClick={onRetrySync}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-800/80 hover:bg-red-700 text-white rounded font-semibold"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Retry Sync</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="py-10 text-center text-xs text-slate-400">
+                  No vulnerable settlements match the selected division filter.
+                </div>
+              )
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs text-slate-300">

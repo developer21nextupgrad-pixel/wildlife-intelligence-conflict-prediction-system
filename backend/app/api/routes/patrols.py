@@ -9,7 +9,7 @@ from app.models import Patrol
 from app.schemas.common import PaginatedResponse
 from app.schemas.patrol import PatrolCreate, PatrolResponse, PatrolUpdate
 from app.services.filters import apply_division_filter, paginate_select
-from app.services.spatial import make_point_geom
+from app.services.spatial import make_point_geom, resolve_village_id
 
 router = APIRouter(prefix="/patrols", tags=["Patrols"])
 
@@ -75,6 +75,9 @@ def get_patrol(patrol_id: uuid.UUID, db: Session = Depends(get_db)) -> PatrolRes
 def create_patrol(
     payload: PatrolCreate, db: Session = Depends(get_db)
 ) -> PatrolResponse:
+    village_id = resolve_village_id(
+        db, payload.village_id, payload.target_area, payload.sector
+    )
     code = (
         payload.patrol_code.strip()
         if payload.patrol_code and payload.patrol_code.strip()
@@ -88,7 +91,7 @@ def create_patrol(
         target_area=payload.target_area,
         sector=payload.sector,
         district=payload.district,
-        village_id=payload.village_id,
+        village_id=village_id,
         priority=payload.priority,
         status=payload.status,
         scheduled_window=payload.scheduled_window,
@@ -120,6 +123,16 @@ def update_patrol(
     updates = payload.model_dump(exclude_unset=True)
     for field, value in updates.items():
         setattr(record, field, value)
+
+    if "village_id" in updates:
+        if updates["village_id"] is not None:
+            record.village_id = resolve_village_id(db, updates["village_id"])
+        elif "target_area" in updates or "sector" in updates:
+            record.village_id = resolve_village_id(
+                db, None, record.target_area, record.sector
+            )
+    elif "target_area" in updates or "sector" in updates:
+        record.village_id = resolve_village_id(db, None, record.target_area, record.sector)
 
     if "latitude" in updates or "longitude" in updates:
         record.geom = make_point_geom(

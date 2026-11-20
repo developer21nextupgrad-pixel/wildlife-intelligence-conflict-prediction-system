@@ -277,6 +277,8 @@ export interface IncidentValidationInput {
   district?: string;
   forestRange?: string;
   humanInjury?: string;
+  humanInjuriesCount?: number;
+  livestockLossCount?: number;
   status?: string;
   reportedBy?: string;
   description: string;
@@ -310,6 +312,22 @@ export function validateIncidentInput(
   }
   if (input.humanInjury !== undefined && !input.humanInjury.trim()) {
     errors.humanInjury = 'Human injury status is required.';
+  }
+  if (
+    input.humanInjuriesCount !== undefined &&
+    (!Number.isInteger(input.humanInjuriesCount) ||
+      input.humanInjuriesCount < 0 ||
+      input.humanInjuriesCount > 1000)
+  ) {
+    errors.humanInjuriesCount = 'Human injuries count must be a whole number (0–1000).';
+  }
+  if (
+    input.livestockLossCount !== undefined &&
+    (!Number.isInteger(input.livestockLossCount) ||
+      input.livestockLossCount < 0 ||
+      input.livestockLossCount > 10000)
+  ) {
+    errors.livestockLossCount = 'Livestock loss count must be a whole number (0–10000).';
   }
   if (input.status !== undefined && !input.status.trim()) {
     errors.status = 'Initial status is required.';

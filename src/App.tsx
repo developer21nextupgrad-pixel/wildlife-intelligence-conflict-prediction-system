@@ -25,6 +25,7 @@ import { PatrolOperationsView } from './components/PatrolOperationsView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { UserManagementView } from './components/UserManagementView';
 import { SettingsView } from './components/SettingsView';
+import { ThermalIngestionView } from './components/ThermalIngestionView';
 import { Menu, X, TreePine, Users, Server, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function App() {
@@ -59,15 +60,11 @@ export default function App() {
   const refreshAllData = async () => {
     setIsSyncingApi(true);
     try {
-      const [vilData, rzData, telData, stfData, cfgData] = await Promise.all([
-        apiBridge.getVillages(),
-        apiBridge.getRiskZones(),
+      const [telData, stfData, cfgData] = await Promise.all([
         apiBridge.getTelemetry(),
         apiBridge.getStaff(),
         apiBridge.getSettings(),
       ]);
-      setVillages(vilData);
-      setRiskZones(rzData);
       setTelemetry(telData);
       setStaff(stfData);
       setSettings(cfgData);
@@ -77,6 +74,8 @@ export default function App() {
       } catch (healthErr) {
         const message =
           healthErr instanceof Error ? healthErr.message : 'Unable to reach FastAPI backend.';
+        setVillages([]);
+        setRiskZones([]);
         setApiError(message);
         setSettings((prev) =>
           prev ? { ...prev, postGisDbStatus: 'FastAPI Backend Offline' } : prev
@@ -89,10 +88,12 @@ export default function App() {
         apiBridge.getSightings(),
         apiBridge.getAlerts(),
         apiBridge.getPatrols(),
+        apiBridge.getVillages(),
+        apiBridge.getRiskZones(),
       ]);
 
       const failures: string[] = [];
-      const [incRes, sightRes, altRes, patRes] = apiResults;
+      const [incRes, sightRes, altRes, patRes, vilRes, rzRes] = apiResults;
 
       if (incRes.status === 'fulfilled') setIncidents(incRes.value);
       else failures.push(`Incidents: ${incRes.reason instanceof Error ? incRes.reason.message : 'Request failed'}`);
@@ -105,6 +106,18 @@ export default function App() {
 
       if (patRes.status === 'fulfilled') setPatrols(patRes.value);
       else failures.push(`Patrols: ${patRes.reason instanceof Error ? patRes.reason.message : 'Request failed'}`);
+
+      if (vilRes.status === 'fulfilled') setVillages(vilRes.value);
+      else {
+        setVillages([]);
+        failures.push(`Villages: ${vilRes.reason instanceof Error ? vilRes.reason.message : 'Request failed'}`);
+      }
+
+      if (rzRes.status === 'fulfilled') setRiskZones(rzRes.value);
+      else {
+        setRiskZones([]);
+        failures.push(`Risk Zones: ${rzRes.reason instanceof Error ? rzRes.reason.message : 'Request failed'}`);
+      }
 
       if (failures.length > 0) {
         setApiError(failures[0]);
@@ -157,6 +170,15 @@ export default function App() {
   const handleAddIncident = async (newIncidentData: Omit<Incident, 'id' | 'incidentCode'>) => {
     const created = await apiBridge.createIncident(newIncidentData);
     setIncidents((prev) => [created, ...prev]);
+    setApiError(null);
+  };
+
+  const handleUpdateIncident = async (
+    id: string,
+    updatedIncidentData: Partial<Omit<Incident, 'id' | 'incidentCode'>>
+  ) => {
+    const updated = await apiBridge.updateIncident(id, updatedIncidentData);
+    setIncidents((prev) => prev.map((item) => (item.id === id ? updated : item)));
     setApiError(null);
   };
 
@@ -235,6 +257,15 @@ export default function App() {
     setApiError(null);
   };
 
+  const handleUpdatePatrol = async (
+    id: string,
+    updatedPatrolData: Partial<Omit<PatrolOperation, 'id' | 'patrolCode'>>
+  ) => {
+    const updated = await apiBridge.updatePatrol(id, updatedPatrolData);
+    setPatrols((prev) => prev.map((p) => (p.id === id ? updated : p)));
+    setApiError(null);
+  };
+
   const handleUpdatePatrolStatus = async (id: string, status: PatrolOperation['status']) => {
     const updated = await apiBridge.updatePatrolStatus(id, status);
     setPatrols((prev) => prev.map((p) => (p.id === id ? updated : p)));
@@ -302,6 +333,7 @@ export default function App() {
     if (activeTab === 'alerts') return 'alert-management';
     if (activeTab === 'patrols') return 'patrol-operations';
     if (activeTab === 'analytics') return 'analytics-reports';
+    if (activeTab === 'thermal' || activeTab === 'ingestion') return 'thermal-ingestion';
     if (activeTab === 'settings' || activeTab === 'users') return 'administration';
     return activeTab;
   })();
@@ -470,6 +502,9 @@ export default function App() {
               dateRange={dateRange}
               setDateRange={setDateRange}
               onResetFilters={handleResetGlobalFilters}
+              isApiLoading={isSyncingApi}
+              apiError={apiError}
+              onRetrySync={refreshAllData}
             />
           )}
 
@@ -487,6 +522,9 @@ export default function App() {
               onSelectIncident={() => {
                 setActiveTab('incident-management');
               }}
+              isApiLoading={isSyncingApi}
+              apiError={apiError}
+              onRetrySync={refreshAllData}
             />
           )}
 
@@ -509,6 +547,7 @@ export default function App() {
               globalSearchQuery={globalSearchQuery}
               onGlobalSearchChange={setGlobalSearchQuery}
               onAddIncident={handleAddIncident}
+              onUpdateIncident={handleUpdateIncident}
               onUpdateStatus={handleUpdateIncidentStatus}
               onDeleteIncident={handleDeleteIncident}
               isApiLoading={isSyncingApi}
@@ -557,6 +596,7 @@ export default function App() {
               patrols={filteredData.patrols}
               onUpdateStatus={handleUpdatePatrolStatus}
               onCreatePatrol={handleCreatePatrol}
+              onUpdatePatrol={handleUpdatePatrol}
               onDeletePatrol={handleDeletePatrol}
               onNavigateToMap={() => setActiveTab('wildlife-risk-map')}
               isApiLoading={isSyncingApi}
@@ -573,7 +613,15 @@ export default function App() {
               selectedDistrict={selectedDistrict}
               dateRange={dateRange}
               onResetGlobalFilters={handleResetGlobalFilters}
+              isApiLoading={isSyncingApi}
+              apiError={apiError}
+              onRetrySync={refreshAllData}
             />
+          )}
+
+          {/* 9.5. Thermal Ingestion (Stage 1 Boundary & CV Preprocessing) */}
+          {resolvedTab === 'thermal-ingestion' && (
+            <ThermalIngestionView villages={villages} />
           )}
 
           {/* 10. Administration (Personnel & FastAPI/PostGIS System Bridge) */}

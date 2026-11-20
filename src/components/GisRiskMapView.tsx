@@ -16,6 +16,8 @@ import {
   Maximize2,
   Calendar,
   RotateCcw,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { formatCoordinates } from '../utils/conflictCalculations';
 import {
@@ -34,6 +36,9 @@ interface GisRiskMapViewProps {
   globalDateRange?: string;
   onResetGlobalFilters?: () => void;
   onSelectIncident?: (incident: Incident) => void;
+  isApiLoading?: boolean;
+  apiError?: string | null;
+  onRetrySync?: () => void;
 }
 
 type SelectedMapFeature =
@@ -53,6 +58,9 @@ export const GisRiskMapView: React.FC<GisRiskMapViewProps> = ({
   globalDateRange,
   onResetGlobalFilters,
   onSelectIncident,
+  isApiLoading = false,
+  apiError = null,
+  onRetrySync,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -94,7 +102,14 @@ export const GisRiskMapView: React.FC<GisRiskMapViewProps> = ({
 
   const filteredVillages = villages.filter((village) => {
     if (selectedRiskLevel !== 'All' && village.riskLevel !== selectedRiskLevel) return false;
-    if (!matchesDivisionOrRange(selectedRange, [village.name, village.assignedRRT, village.district])) {
+    if (
+      !matchesDivisionOrRange(selectedRange, [
+        village.name,
+        village.forestRange || '',
+        village.assignedRRT,
+        village.district,
+      ])
+    ) {
       return false;
     }
     return true;
@@ -624,22 +639,51 @@ export const GisRiskMapView: React.FC<GisRiskMapViewProps> = ({
       <div className="relative flex-1 w-full h-full overflow-hidden">
         <div ref={mapContainerRef} className="w-full h-full z-0" />
 
-        {/* Empty Results Overlay Banner */}
-        {totalVisibleFeatures === 0 && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 border border-amber-700/70 rounded-xl px-4 py-3 shadow-xl flex items-center gap-3 text-xs">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+        {/* Loading, Error, or Empty Results Overlay Banner */}
+        {isApiLoading && villages.length === 0 && riskZones.length === 0 ? (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 border border-emerald-700/70 rounded-xl px-4 py-3 shadow-xl flex items-center gap-3 text-xs">
+            <Loader2 className="w-4 h-4 text-emerald-400 animate-spin shrink-0" />
             <span className="text-slate-200">
-              No GIS features match the active filters
-              {globalDistrict ? ` (${globalDistrict}${globalDateRange ? ` • ${globalDateRange}` : ''})` : ''}.
+              Loading villages and GIS risk zones from FastAPI + PostGIS...
             </span>
-            <button
-              onClick={handleResetAllMapFilters}
-              className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded-md font-semibold transition"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Reset Filters</span>
-            </button>
           </div>
+        ) : apiError && villages.length === 0 && riskZones.length === 0 ? (
+          <div
+            role="alert"
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 border border-red-700/70 rounded-xl px-4 py-3 shadow-xl flex items-center gap-3 text-xs max-w-xl"
+          >
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+            <span className="text-red-200">
+              Unable to load GIS villages &amp; risk zones from backend API ({apiError}).
+            </span>
+            {onRetrySync && (
+              <button
+                type="button"
+                onClick={onRetrySync}
+                className="flex items-center gap-1 bg-red-700 hover:bg-red-600 text-white px-2.5 py-1 rounded-md font-semibold transition shrink-0"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Retry API Sync</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          totalVisibleFeatures === 0 && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-slate-900/95 border border-amber-700/70 rounded-xl px-4 py-3 shadow-xl flex items-center gap-3 text-xs">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="text-slate-200">
+                No GIS features match the active filters
+                {globalDistrict ? ` (${globalDistrict}${globalDateRange ? ` • ${globalDateRange}` : ''})` : ''}.
+              </span>
+              <button
+                onClick={handleResetAllMapFilters}
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1 rounded-md font-semibold transition"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Reset Filters</span>
+              </button>
+            </div>
+          )
         )}
 
         {/* Floating Legend Card */}

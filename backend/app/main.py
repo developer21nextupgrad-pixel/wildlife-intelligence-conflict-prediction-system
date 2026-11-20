@@ -17,6 +17,7 @@ logger = logging.getLogger("wicps.app")
 
 def create_application(custom_settings: Settings | None = None) -> FastAPI:
     settings = custom_settings or get_settings()
+    settings.validate_production_requirements()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -47,7 +48,7 @@ def create_application(custom_settings: Settings | None = None) -> FastAPI:
         "allow_origin_regex": settings.cors_origin_regex or None,
         "allow_credentials": True,
         "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        "allow_headers": ["Authorization", "Content-Type", "X-Requested-With"],
+        "allow_headers": ["Authorization", "Content-Type", "X-Requested-With", "X-Camera-Key"],
     }
     if "allow_private_network" in inspect.signature(CORSMiddleware.__init__).parameters:
         cors_kwargs["allow_private_network"] = True

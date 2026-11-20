@@ -2,15 +2,15 @@ from datetime import datetime, timezone
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
-from app.models import Alert, Village
+from app.models import Alert
 from app.schemas.alert import AlertCreate, AlertResponse, AlertUpdate
 from app.schemas.common import PaginatedResponse
 from app.services.filters import apply_date_window, apply_division_filter, paginate_select
-from app.services.spatial import make_point_geom
+from app.services.spatial import make_point_geom, resolve_village_id
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
@@ -82,15 +82,7 @@ def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db)) -> AlertRespon
 @router.post("", response_model=AlertResponse, status_code=status.HTTP_201_CREATED)
 def create_alert(payload: AlertCreate, db: Session = Depends(get_db)) -> AlertResponse:
     now = datetime.now(timezone.utc)
-    village_id = payload.village_id
-    if village_id is None:
-        matched_village = db.execute(
-            select(Village).where(
-                func.lower(Village.name) == payload.affected_village.strip().lower()
-            )
-        ).scalar_one_or_none()
-        if matched_village:
-            village_id = matched_village.id
+    village_id = resolve_village_id(db, payload.village_id, payload.affected_village)
 
     triggered = payload.triggered_at or now
     alert_time = payload.alert_time or triggered.strftime("%Y-%m-%d %H:%M UTC")
@@ -134,6 +126,14 @@ def update_alert(
     updates = payload.model_dump(exclude_unset=True)
     for field, value in updates.items():
         setattr(record, field, value)
+
+    if "village_id" in updates:
+        if updates["village_id"] is not None:
+            record.village_id = resolve_village_id(db, updates["village_id"])
+        elif "affected_village" in updates:
+            record.village_id = resolve_village_id(db, None, record.affected_village)
+    elif "affected_village" in updates:
+        record.village_id = resolve_village_id(db, None, record.affected_village)
 
     if updates.get("acknowledged") is True and "acknowledged_at" not in updates:
         record.acknowledged_at = datetime.now(timezone.utc)

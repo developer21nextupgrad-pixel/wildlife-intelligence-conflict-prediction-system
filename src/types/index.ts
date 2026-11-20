@@ -77,12 +77,14 @@ export interface RiskZone {
   polygonCoordinates: [number, number][];
   activeAlertCount: number;
   primaryRiskFactor: string;
+  isDemo?: boolean;
 }
 
 export interface VillageRiskProfile {
   id: string;
   name: string;
   district: string;
+  forestRange?: string;
   population: number;
   households: number;
   forestDistanceKm: number;
@@ -94,6 +96,7 @@ export interface VillageRiskProfile {
   assignedRRT: string;
   emergencyContact: string;
   recentIncidents30d: number;
+  isDemo?: boolean;
 }
 
 export interface AlertNotification {
@@ -196,4 +199,127 @@ export interface PatrolOperation {
   isDemo?: boolean;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export type CameraZoneType = 'crop_field' | 'structure' | 'perimeter_boundary';
+
+export type CameraProtocol = 'rtsp' | 'http_push' | 'file_upload';
+
+export type CameraStatus = 'active' | 'offline' | 'maintenance';
+
+export interface ThermalCamera {
+  id: string;
+  cameraCode: string;
+  name: string;
+  villageId?: string | null;
+  zoneName: string;
+  zoneType: CameraZoneType;
+  latitude: number;
+  longitude: number;
+  protocol: CameraProtocol;
+  streamMetadata: Record<string, unknown>;
+  status: CameraStatus;
+  lastHeartbeatAt?: string | null;
+  isDevTest: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ThermalCameraCreateInput {
+  cameraCode: string;
+  name: string;
+  villageId?: string;
+  villageName?: string;
+  zoneName: string;
+  zoneType: CameraZoneType;
+  latitude: number;
+  longitude: number;
+  protocol: CameraProtocol;
+  streamMetadata?: Record<string, unknown>;
+  status?: CameraStatus;
+  isDevTest: boolean;
+}
+
+export interface ThermalCameraCreateResult extends ThermalCamera {
+  apiKey: string;
+  apiKeyNotice: string;
+}
+
+export interface ThermalFrameQcMetrics {
+  decode_ok?: boolean;
+  width?: number;
+  height?: number;
+  bit_depth?: number;
+  sharpness_laplacian?: number;
+  mean_intensity?: number;
+  std_intensity?: number;
+  min_raw?: number;
+  max_raw?: number;
+  dynamic_range?: number;
+  normalization_method?: string;
+  is_blank_or_uniform?: boolean;
+  clahe_applied?: boolean;
+  gaussian_denoise_kernel?: string;
+  processed_width?: number;
+  processed_height?: number;
+  [key: string]: unknown;
+}
+
+export interface ThermalFrameRecord {
+  id: string;
+  cameraId: string;
+  cameraCode?: string | null;
+  cameraName?: string | null;
+  zoneName?: string | null;
+  captureMode: 'http_push' | 'rtsp_test_pull' | 'dev_sample_upload' | string;
+  sourceFilename?: string | null;
+  capturedAt: string;
+  frameIndex: number;
+  width: number;
+  height: number;
+  pixelFormat: string;
+  qcPassed: boolean;
+  qcMetrics: ThermalFrameQcMetrics;
+  rejectionReason?: string | null;
+  rawObjectKey: string;
+  processedObjectKey?: string | null;
+  processingStatus: 'ingested' | 'preprocessed' | 'qc_failed' | string;
+  isDevTest: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DevSampleIngestResult {
+  mode: 'DEVELOPMENT_TEST_MODE' | string;
+  notice: string;
+  cameraId: string;
+  cameraCode: string;
+  storageBackend: string;
+  mediaType: 'image' | 'video';
+  extractedCount: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  videoSummary?: {
+    native_fps?: number;
+    target_fps?: number;
+    source_frame_count?: number;
+    extracted_frame_count?: number;
+  } | null;
+  frames: ThermalFrameRecord[];
+}
+
+export interface RtspTestPullInput {
+  cameraId?: string;
+  rtspUrl: string;
+  maxFrames: number;
+  timeoutSeconds: number;
+}
+
+export interface RtspTestPullResult {
+  reachable: boolean;
+  maskedRtspUrl: string;
+  framesRetrieved: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  frames: ThermalFrameRecord[];
 }

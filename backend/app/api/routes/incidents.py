@@ -2,15 +2,15 @@ from datetime import datetime
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
-from app.models import Incident, Village
+from app.models import Incident
 from app.schemas.common import PaginatedResponse
 from app.schemas.incident import IncidentCreate, IncidentResponse, IncidentUpdate
 from app.services.filters import apply_date_window, apply_division_filter, paginate_select
-from app.services.spatial import make_point_geom
+from app.services.spatial import make_point_geom, resolve_village_id
 
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
@@ -88,13 +88,7 @@ def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> Incid
 def create_incident(
     payload: IncidentCreate, db: Session = Depends(get_db)
 ) -> IncidentResponse:
-    village_id = payload.village_id
-    if village_id is None:
-        matched_village = db.execute(
-            select(Village).where(func.lower(Village.name) == payload.village.strip().lower())
-        ).scalar_one_or_none()
-        if matched_village:
-            village_id = matched_village.id
+    village_id = resolve_village_id(db, payload.village_id, payload.village)
 
     code = (
         payload.incident_code.strip()
@@ -147,6 +141,14 @@ def update_incident(
     updates = payload.model_dump(exclude_unset=True)
     for field, value in updates.items():
         setattr(record, field, value)
+
+    if "village_id" in updates:
+        if updates["village_id"] is not None:
+            record.village_id = resolve_village_id(db, updates["village_id"])
+        elif "village" in updates:
+            record.village_id = resolve_village_id(db, None, record.village)
+    elif "village" in updates:
+        record.village_id = resolve_village_id(db, None, record.village)
 
     if "latitude" in updates or "longitude" in updates:
         record.geom = make_point_geom(

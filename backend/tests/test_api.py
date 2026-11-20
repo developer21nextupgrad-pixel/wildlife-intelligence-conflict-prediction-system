@@ -424,3 +424,125 @@ def test_cors_and_private_network_access_preflight(client: TestClient):
     )
     assert disallowed.status_code == 400
     assert disallowed.headers.get("access-control-allow-origin") is None
+
+
+def test_village_id_resolution_on_create_and_update(seeded_client: TestClient):
+    villages_res = seeded_client.get("/api/v1/villages")
+    assert villages_res.status_code == 200
+    villages_by_name = {v["name"]: v["id"] for v in villages_res.json()["items"]}
+    kadambur_id = villages_by_name["Kadambur Fringe"]
+    mangala_id = villages_by_name["Mangala Settlement"]
+
+    # 1. Incident resolves village_id on create and re-resolves on update
+    inc_res = seeded_client.post(
+        "/api/v1/incidents",
+        json={
+            "species": "Asian Elephant",
+            "date_time": datetime.now(timezone.utc).isoformat(),
+            "latitude": 11.664,
+            "longitude": 76.622,
+            "village": "Kadambur Fringe",
+            "district": "Bandipur Division",
+            "forest_range": "Hediyala Range",
+            "incident_type": "Crop Depredation",
+            "severity": "High",
+            "human_injuries_count": 1,
+            "livestock_loss_count": 2,
+            "description": "FK resolution incident test.",
+            "reported_by": "Tester",
+        },
+    )
+    assert inc_res.status_code == 201
+    inc = inc_res.json()
+    assert inc["village_id"] == kadambur_id
+
+    inc_upd = seeded_client.put(
+        f"/api/v1/incidents/{inc['id']}",
+        json={"village": "Mangala Settlement", "human_injuries_count": 2},
+    )
+    assert inc_upd.status_code == 200
+    assert inc_upd.json()["village_id"] == mangala_id
+    assert inc_upd.json()["human_injuries_count"] == 2
+    assert seeded_client.delete(f"/api/v1/incidents/{inc['id']}").status_code == 200
+
+    # 2. Alert resolves village_id on create and re-resolves when affected_village changes
+    alert_res = seeded_client.post(
+        "/api/v1/alerts",
+        json={
+            "title": "FK Test Alert",
+            "message": "Boundary alert test.",
+            "severity": "High",
+            "species": "Asian Elephant",
+            "affected_village": "Kadambur Fringe",
+            "district": "Bandipur Division",
+            "latitude": 11.664,
+            "longitude": 76.622,
+        },
+    )
+    assert alert_res.status_code == 201
+    alert = alert_res.json()
+    assert alert["village_id"] == kadambur_id
+
+    alert_upd = seeded_client.put(
+        f"/api/v1/alerts/{alert['id']}",
+        json={"affected_village": "Mangala Settlement"},
+    )
+    assert alert_upd.status_code == 200
+    assert alert_upd.json()["village_id"] == mangala_id
+    assert seeded_client.delete(f"/api/v1/alerts/{alert['id']}").status_code == 200
+
+    # 3. Patrol resolves village_id from target_area / sector on create and update
+    patrol_res = seeded_client.post(
+        "/api/v1/patrols",
+        json={
+            "team_name": "QRT FK Test",
+            "lead_officer": "RFO Rao",
+            "target_area": "Kadambur Pylon 54",
+            "sector": "Hediyala Range",
+            "district": "Bandipur Division",
+            "priority": "High",
+            "status": "Scheduled",
+            "scheduled_window": "20:00 - 04:00 IST",
+            "active_personnel": 4,
+            "equipment": ["Thermal Scope"],
+            "risk_rationale": "Night patrol FK verification.",
+            "approved_by": "DFO",
+            "latitude": 11.664,
+            "longitude": 76.622,
+        },
+    )
+    assert patrol_res.status_code == 201
+    patrol = patrol_res.json()
+    assert patrol["village_id"] == kadambur_id
+
+    patrol_upd = seeded_client.put(
+        f"/api/v1/patrols/{patrol['id']}",
+        json={"target_area": "Mangala - Gundlupet Buffer", "sector": "Gundlupet Buffer"},
+    )
+    assert patrol_upd.status_code == 200
+    assert patrol_upd.json()["village_id"] == mangala_id
+    assert seeded_client.delete(f"/api/v1/patrols/{patrol['id']}").status_code == 200
+
+    # 4. Explicit nonexistent village_id is rejected with 422
+    bad_patrol = seeded_client.post(
+        "/api/v1/patrols",
+        json={
+            "team_name": "QRT Invalid FK",
+            "lead_officer": "RFO Rao",
+            "target_area": "Kadambur Pylon 54",
+            "sector": "Hediyala Range",
+            "district": "Bandipur Division",
+            "village_id": "00000000-0000-0000-0000-000000000099",
+            "priority": "High",
+            "status": "Scheduled",
+            "scheduled_window": "20:00 - 04:00 IST",
+            "active_personnel": 4,
+            "equipment": [],
+            "risk_rationale": "Invalid FK test.",
+            "approved_by": "DFO",
+            "latitude": 11.664,
+            "longitude": 76.622,
+        },
+    )
+    assert bad_patrol.status_code == 422
+

@@ -7,6 +7,9 @@ import {
   Layers,
   ShieldCheck,
   RotateCcw,
+  AlertTriangle,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -28,6 +31,9 @@ interface AnalyticsViewProps {
   selectedDistrict?: string;
   dateRange?: string;
   onResetGlobalFilters?: () => void;
+  isApiLoading?: boolean;
+  apiError?: string | null;
+  onRetrySync?: () => void;
 }
 
 const TIME_SLOTS = [
@@ -47,6 +53,9 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   selectedDistrict = 'Bandipur Division',
   dateRange = 'Last 30 Days',
   onResetGlobalFilters,
+  isApiLoading = false,
+  apiError = null,
+  onRetrySync,
 }) => {
   // 1. Diurnal Encounter Distribution derived from filtered incidents
   const timeOfDayData = TIME_SLOTS.map((slot) => {
@@ -211,10 +220,18 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-xs">
           <div className="text-slate-400 text-xs font-bold uppercase">Solar Fence Integrity</div>
           <div className="text-2xl font-extrabold text-amber-400 font-mono tabular-nums mt-1">
-            {fenceIntegrityPct}%
+            {villages.length === 0 && isApiLoading
+              ? 'Syncing...'
+              : villages.length === 0 && apiError
+              ? 'Offline'
+              : `${fenceIntegrityPct}%`}
           </div>
           <div className="text-[11px] text-amber-300 font-semibold mt-1 font-mono tabular-nums">
-            {operationalFences} of {fencedVillages.length} fenced settlements operational
+            {villages.length === 0 && isApiLoading
+              ? 'Fetching settlement telemetry'
+              : villages.length === 0 && apiError
+              ? 'Village API unreachable'
+              : `${operationalFences} of ${fencedVillages.length} fenced settlements operational`}
           </div>
         </div>
 
@@ -345,9 +362,33 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
           <div className="h-64 w-full">
             {villageRankings.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs text-slate-400">
-                No villages match the active division filter.
-              </div>
+              isApiLoading ? (
+                <div className="h-full flex items-center justify-center gap-2 text-xs text-slate-300">
+                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                  <span>Loading village risk rankings from backend API...</span>
+                </div>
+              ) : apiError ? (
+                <div className="h-full flex flex-col items-center justify-center gap-2 text-xs text-red-300 text-center px-4">
+                  <div className="flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>Unable to load settlement rankings ({apiError}).</span>
+                  </div>
+                  {onRetrySync && (
+                    <button
+                      type="button"
+                      onClick={onRetrySync}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-800/80 hover:bg-red-700 text-white rounded font-semibold"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Retry Sync</span>
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                  No villages match the active division filter.
+                </div>
+              )
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={villageRankings} margin={{ top: 10, right: 10, left: -15, bottom: 25 }}>

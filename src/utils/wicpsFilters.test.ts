@@ -146,8 +146,22 @@ test('validateCoordinates, validateIncidentInput, and validateSightingInput enfo
     latitude: 11.6624,
     longitude: 76.6189,
     cropDamageEstimatedAcres: 0,
+    humanInjuriesCount: 0,
+    livestockLossCount: 2,
   });
   assert.deepEqual(okIncident, {});
+
+  const badIncidentCounts = validateIncidentInput({
+    village: 'Kadambur',
+    description: 'Fence breach verified',
+    latitude: 11.6624,
+    longitude: 76.6189,
+    cropDamageEstimatedAcres: 1,
+    humanInjuriesCount: -1,
+    livestockLossCount: 1.5,
+  });
+  assert.ok(badIncidentCounts.humanInjuriesCount);
+  assert.ok(badIncidentCounts.livestockLossCount);
 
   const badSighting = validateSightingInput({
     locationName: '',
@@ -355,11 +369,27 @@ test('Core React views render cleanly via SSR with honest DEMO disclaimers and e
     React.createElement(PatrolOperationsView, {
       patrols: INITIAL_PATROLS,
       onCreatePatrol: async () => {},
+      onUpdatePatrol: async () => {},
+      onDeletePatrol: async () => {},
       onUpdateStatus: async () => {},
       onNavigateToMap: () => {},
     })
   );
   assert.match(patrolsHtml, /View Sectors on GIS Map/);
+  assert.match(patrolsHtml, /Edit patrol/);
+  assert.match(patrolsHtml, /Delete patrol/);
+
+  const incEditableHtml = renderToStaticMarkup(
+    React.createElement(IncidentManagementView, {
+      incidents: INITIAL_INCIDENTS.slice(0, 1),
+      onAddIncident: async () => {},
+      onUpdateIncident: async () => {},
+      onUpdateStatus: async () => {},
+      isModalOpen: false,
+      setIsModalOpen: () => {},
+    })
+  );
+  assert.match(incEditableHtml, /Edit incident/);
 
   const analyticsHtml = renderToStaticMarkup(
     React.createElement(AnalyticsView, {
@@ -370,4 +400,15 @@ test('Core React views render cleanly via SSR with honest DEMO disclaimers and e
     })
   );
   assert.match(analyticsHtml, /Diurnal|Monthly Conflict Trend|Human-Wildlife Conflict Analytics/);
+
+  const analyticsOfflineHtml = renderToStaticMarkup(
+    React.createElement(AnalyticsView, {
+      incidents: [],
+      villages: [],
+      apiError: 'FastAPI unreachable',
+      onRetrySync: () => {},
+    })
+  );
+  assert.match(analyticsOfflineHtml, /Unable to load settlement rankings/);
+  assert.match(analyticsOfflineHtml, /Retry Sync/);
 });
