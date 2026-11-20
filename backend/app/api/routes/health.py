@@ -18,6 +18,7 @@ from app.models import (
     Village,
 )
 from app.schemas.common import DatabaseHealthResponse, HealthResponse
+from app.services.storage import ObjectStorageBackend, get_storage_backend
 
 router = APIRouter(prefix="/health", tags=["Health"])
 
@@ -66,3 +67,16 @@ def database_health_check(db: Session = Depends(get_db)) -> DatabaseHealthRespon
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Database health check failed: {type(exc).__name__}",
         ) from exc
+
+
+@router.get("/storage")
+def storage_health_check(
+    storage: ObjectStorageBackend = Depends(get_storage_backend),
+) -> dict:
+    info = storage.verify_access()
+    if not info.get("reachable"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=info,
+        )
+    return {"status": "ok", **info}

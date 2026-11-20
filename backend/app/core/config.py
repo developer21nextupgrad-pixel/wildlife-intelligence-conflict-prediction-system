@@ -1,6 +1,15 @@
 from functools import lru_cache
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _clean_optional_str(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned or None
 
 
 class Settings(BaseSettings):
@@ -49,6 +58,37 @@ class Settings(BaseSettings):
     rtsp_test_timeout_seconds: float = 8.0
     rtsp_test_max_frames: int = 5
 
+    @field_validator(
+        "s3_endpoint_url",
+        "s3_bucket",
+        "s3_access_key_id",
+        "s3_secret_access_key",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_s3_strings(cls, value: str | None) -> str | None:
+        return _clean_optional_str(value)
+
+    @field_validator("s3_region", mode="before")
+    @classmethod
+    def normalize_s3_region(cls, value: str | None) -> str:
+        return _clean_optional_str(value) or ""
+
+    @model_validator(mode="after")
+    def apply_s3_provider_defaults(self) -> "Settings":
+        if self.s3_endpoint_url:
+            self.s3_endpoint_url = self.s3_endpoint_url.rstrip("/") or None
+        endpoint = (self.s3_endpoint_url or "").lower()
+        is_tigris_or_r2 = any(
+            domain in endpoint
+            for domain in ("storage.dev", "tigris.dev", "r2.cloudflarestorage.com")
+        )
+        if not self.s3_region:
+            self.s3_region = "auto" if is_tigris_or_r2 else "us-east-1"
+        elif is_tigris_or_r2 and "s3_region" not in self.model_fields_set:
+            self.s3_region = "auto"
+        return self
+
     @field_validator("rate_limit_requests")
     @classmethod
     def validate_rate_limit_requests(cls, value: int) -> int:
@@ -93,6 +133,11 @@ class Settings(BaseSettings):
         if (self.storage_backend or "").strip().lower() != "s3" or not (self.s3_bucket or "").strip():
             raise RuntimeError(
                 "Production configuration error: STORAGE_BACKEND=s3 and S3_BUCKET are required in production. Local filesystem storage is disallowed."
+            )
+
+        if bool(self.s3_access_key_id) != bool(self.s3_secret_access_key):
+            raise RuntimeError(
+                "Production configuration error: S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must both be configured together."
             )
 
 

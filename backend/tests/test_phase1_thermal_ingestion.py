@@ -659,3 +659,201 @@ def test_delete_camera_preserves_historical_frames_and_storage_objects(phase1_cl
     assert client.get(f"/api/v1/ingest/frames/{frame_id}/image?variant=processed").status_code == 200
 
 
+def test_tigris_s3_client_config_checksums_virtual_addressing_and_region_defaults():
+    from app.core.config import Settings
+    from app.services.storage import ObjectStorageError, S3ObjectStorage, build_storage_backend
+
+    settings = Settings(
+        environment="production",
+        database_url="postgresql+psycopg://user:pass@ep-cool.neon.tech/wicps?sslmode=require",
+        storage_backend="s3",
+        s3_endpoint_url=" https://t3.storage.dev/ ",
+        s3_bucket=" wicps-thermal ",
+        s3_access_key_id=" tid_test_key ",
+        s3_secret_access_key=" tsec_test_secret ",
+    )
+    settings.validate_production_requirements()
+    assert settings.s3_region == "auto"
+    assert settings.s3_endpoint_url == "https://t3.storage.dev"
+    assert settings.s3_bucket == "wicps-thermal"
+
+    s3 = build_storage_backend(settings)
+    assert isinstance(s3, S3ObjectStorage)
+    assert s3.addressing_style == "virtual"
+    assert s3.region == "auto"
+    assert s3.endpoint_url == "https://t3.storage.dev"
+
+    # Verify real botocore request construction: virtual-hosted URL and no aws-chunked checksum headers
+    captured: dict = {}
+
+    def _mock_send(request, **kwargs):
+        captured["url"] = request.url
+        captured["headers"] = dict(request.headers)
+        return type("Resp", (), {"status_code": 200, "headers": {}, "content": b""})()
+
+    s3._client.meta.events.register("before-send.s3.PutObject", _mock_send)
+    try:
+        key = s3.put_bytes("raw-frames/CAM-1/sample.png", b"png-data", "image/png")
+    except Exception:
+        pass
+    assert captured["url"] == "https://wicps-thermal.t3.storage.dev/raw-frames/CAM-1/sample.png"
+    lower_headers = {k.lower(): v for k, v in captured["headers"].items()}
+    assert "x-amz-sdk-checksum-algorithm" not in lower_headers
+    assert "x-amz-trailer" not in lower_headers
+    assert "transfer-encoding" not in lower_headers
+    assert lower_headers.get("content-length") == "8"
+
+    # Bucket-prefixed endpoint URL is normalized safely so virtual addressing does not double-prefix
+    prefixed = S3ObjectStorage(
+        bucket="wicps-thermal",
+        region="auto",
+        endpoint_url="https://wicps-thermal.t3.storage.dev/",
+        access_key_id="tid_test_key",
+        secret_access_key="tsec_test_secret",
+    )
+    assert prefixed.endpoint_url == "https://t3.storage.dev"
+    assert prefixed.addressing_style == "virtual"
+
+    # Partial credentials are rejected explicitly
+    with pytest.raises(ObjectStorageError, match="must both be configured together"):
+        S3ObjectStorage(
+            bucket="wicps-thermal",
+            endpoint_url="https://t3.storage.dev",
+            access_key_id="tid_only",
+        )
+
+
+def test_s3_put_bytes_error_logging_redacts_secrets_and_end_to_end_db_persistence(
+    db_session, caplog, monkeypatch
+):
+    from botocore.exceptions import ClientError
+    from app.core.config import Settings
+    from app.core.database import get_db
+    from app.main import create_application
+    from app.services.storage import ObjectStorageError, S3ObjectStorage, get_storage_backend
+
+    secret_val = "tsec_super_secret_987654"
+    access_val = "tid_public_key_12345"
+    stored_objects: dict[tuple[str, str], tuple[bytes, str]] = {}
+    should_fail_put = True
+
+    class FakeTigrisClient:
+        def head_bucket(self, Bucket):
+            return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+        def put_object(self, Bucket, Key, Body, ContentType):
+            if should_fail_put:
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "AccessDenied",
+                            "Message": f"Access Denied while validating {secret_val}",
+                        },
+                        "ResponseMetadata": {
+                            "HTTPStatusCode": 403,
+                            "RequestId": "req-tigris-403",
+                        },
+                    },
+                    "PutObject",
+                )
+            stored_objects[(Bucket, Key)] = (Body, ContentType)
+
+        def get_object(self, Bucket, Key):
+            if (Bucket, Key) not in stored_objects:
+                raise ClientError(
+                    {"Error": {"Code": "NoSuchKey", "Message": "Not found"}},
+                    "GetObject",
+                )
+            body, ctype = stored_objects[(Bucket, Key)]
+            return {"Body": io.BytesIO(body), "ContentType": ctype}
+
+        def head_object(self, Bucket, Key):
+            if (Bucket, Key) not in stored_objects:
+                raise ClientError(
+                    {"Error": {"Code": "404", "Message": "Not Found"}},
+                    "HeadObject",
+                )
+
+        def delete_object(self, Bucket, Key):
+            stored_objects.pop((Bucket, Key), None)
+
+    monkeypatch.setattr("app.services.storage.boto3.client", lambda *a, **kw: FakeTigrisClient())
+
+    s3 = S3ObjectStorage(
+        bucket="wicps-tigris-prod",
+        region="auto",
+        endpoint_url="https://t3.storage.dev",
+        access_key_id=access_val,
+        secret_access_key=secret_val,
+    )
+
+    caplog.set_level("ERROR", logger="wicps.storage")
+    with pytest.raises(ObjectStorageError, match=r"AccessDenied"):
+        s3.put_bytes("raw-frames/CAM-ERR/frame.png", b"data", "image/png")
+
+    log_output = caplog.text
+    assert "code=AccessDenied" in log_output
+    assert "http_status=403" in log_output
+    assert "request_id=req-tigris-403" in log_output
+    assert "bucket=wicps-tigris-prod" in log_output
+    assert secret_val not in log_output
+    assert access_val not in log_output
+
+    settings = Settings(environment="test", auto_seed_demo_data=False)
+    app = create_application(settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[get_storage_backend] = lambda: s3
+
+    img = _make_synthetic_thermal_8bit(320, 240)
+    ok, png_buf = cv2.imencode(".png", img)
+    assert ok
+
+    try:
+        with TestClient(app) as client:
+            health = client.get("/api/v1/health/storage")
+            assert health.status_code == 200
+            health_json = health.json()
+            assert health_json["backend"] == "s3"
+            assert health_json["bucket"] == "wicps-tigris-prod"
+            assert health_json["addressing_style"] == "virtual"
+            assert health_json["reachable"] is True
+
+            # Failure returns structured 502 with S3 code and rolls back DB frame creation
+            fail_res = client.post(
+                "/api/v1/ingest/dev-sample",
+                files={"file": ("tigris_fail.png", png_buf.tobytes(), "image/png")},
+            )
+            assert fail_res.status_code == 502
+            fail_body = fail_res.json()
+            assert fail_body["error"] == "object_storage_error"
+            assert "AccessDenied" in fail_body["detail"]
+            assert secret_val not in fail_body["detail"]
+            assert client.get("/api/v1/ingest/frames").json()["total"] == 0
+
+            # Success stores raw & processed objects in S3 and persists object keys in DB
+            should_fail_put = False
+            ok_res = client.post(
+                "/api/v1/ingest/dev-sample",
+                files={"file": ("tigris_ok.png", png_buf.tobytes(), "image/png")},
+            )
+            assert ok_res.status_code == 201
+            body = ok_res.json()
+            assert body["storage_backend"] == "s3"
+            frame = body["frames"][0]
+            raw_key = frame["raw_object_key"]
+            proc_key = frame["processed_object_key"]
+            assert ("wicps-tigris-prod", raw_key) in stored_objects
+            assert ("wicps-tigris-prod", proc_key) in stored_objects
+
+            # Persisted in DB and readable through API
+            listed = client.get("/api/v1/ingest/frames").json()["items"]
+            assert len(listed) == 1
+            assert listed[0]["raw_object_key"] == raw_key
+            assert listed[0]["processed_object_key"] == proc_key
+            assert client.get(f"/api/v1/ingest/frames/{frame['id']}/image?variant=raw").status_code == 200
+            assert client.get(f"/api/v1/ingest/frames/{frame['id']}/image?variant=processed").status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+

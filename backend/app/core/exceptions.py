@@ -5,6 +5,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.services.storage import ObjectStorageError
+
 logger = logging.getLogger("wicps.api")
 
 
@@ -71,6 +73,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={
                 "error": "database_unavailable",
                 "detail": "Database operation failed or database is temporarily unreachable.",
+                "path": request.url.path,
+            },
+        )
+
+    @app.exception_handler(ObjectStorageError)
+    async def object_storage_exception_handler(
+        request: Request, exc: ObjectStorageError
+    ) -> JSONResponse:
+        logger.error("Object storage error on %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={
+                "error": "object_storage_error",
+                "detail": str(exc),
                 "path": request.url.path,
             },
         )

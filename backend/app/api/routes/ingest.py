@@ -104,15 +104,19 @@ def _persist_frame_outcome(
 ) -> ThermalFrame:
     frame_id = uuid.uuid4()
     date_prefix = outcome.captured_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
-    raw_key = f"raw-frames/{camera.camera_code}/{date_prefix}/{frame_id}{outcome.raw_extension}"
-    storage.put_bytes(raw_key, outcome.raw_bytes, content_type=outcome.raw_content_type)
+    raw_key = storage.put_bytes(
+        f"raw-frames/{camera.camera_code}/{date_prefix}/{frame_id}{outcome.raw_extension}",
+        outcome.raw_bytes,
+        content_type=outcome.raw_content_type,
+    )
 
     processed_key: str | None = None
     if outcome.qc_passed and outcome.processed_png_bytes is not None:
-        processed_key = (
-            f"processed-frames/{camera.camera_code}/{date_prefix}/{frame_id}_640x640.png"
+        processed_key = storage.put_bytes(
+            f"processed-frames/{camera.camera_code}/{date_prefix}/{frame_id}_640x640.png",
+            outcome.processed_png_bytes,
+            content_type="image/png",
         )
-        storage.put_bytes(processed_key, outcome.processed_png_bytes, content_type="image/png")
 
     record = ThermalFrame(
         id=frame_id,
