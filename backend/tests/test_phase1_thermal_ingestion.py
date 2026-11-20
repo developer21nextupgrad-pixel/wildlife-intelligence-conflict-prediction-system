@@ -477,6 +477,7 @@ def test_mp4_video_fps_extraction(phase1_client):
 
 
 def test_alembic_upgrade_0001_and_0002_on_sqlite(tmp_path: Path, monkeypatch):
+    from alembic.script import ScriptDirectory
     from app.core.config import get_settings
 
     backend_dir = Path(__file__).resolve().parents[1]
@@ -486,10 +487,16 @@ def test_alembic_upgrade_0001_and_0002_on_sqlite(tmp_path: Path, monkeypatch):
     try:
         cfg = Config(str(backend_dir / "alembic.ini"))
         cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+        script_dir = ScriptDirectory.from_config(cfg)
+        for rev in script_dir.walk_revisions():
+            assert len(rev.revision) <= 32, (
+                f"Alembic revision '{rev.revision}' exceeds VARCHAR(32) limit ({len(rev.revision)} chars)"
+            )
+
         command.upgrade(cfg, "head")
         command.downgrade(cfg, "0001_initial_schema")
         command.upgrade(cfg, "0002_cameras_and_thermal_frames")
-        command.upgrade(cfg, "0003_preserve_thermal_frames_on_camera_delete")
+        command.upgrade(cfg, "0003_thermal_delete")
         command.downgrade(cfg, "0002_cameras_and_thermal_frames")
         command.upgrade(cfg, "head")
     finally:

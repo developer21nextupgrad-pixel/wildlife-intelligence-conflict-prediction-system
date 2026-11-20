@@ -1,6 +1,6 @@
 """Preserve historical thermal_frames when a camera is deleted
 
-Revision ID: 0003_preserve_thermal_frames_on_camera_delete
+Revision ID: 0003_thermal_delete
 Revises: 0002_cameras_and_thermal_frames
 Create Date: 2026-11-20 03:40:00
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0003_preserve_thermal_frames_on_camera_delete"
+revision: str = "0003_thermal_delete"
 down_revision: Union[str, Sequence[str], None] = "0002_cameras_and_thermal_frames"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
