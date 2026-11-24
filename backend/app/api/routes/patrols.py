@@ -5,6 +5,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Patrol
 from app.schemas.common import PaginatedResponse
 from app.schemas.patrol import PatrolCreate, PatrolResponse, PatrolUpdate
@@ -14,7 +15,11 @@ from app.services.spatial import make_point_geom, resolve_village_id
 router = APIRouter(prefix="/patrols", tags=["Patrols"])
 
 
-@router.get("", response_model=PaginatedResponse[PatrolResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[PatrolResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_patrols(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -63,7 +68,11 @@ def list_patrols(
     )
 
 
-@router.get("/{patrol_id}", response_model=PatrolResponse)
+@router.get(
+    "/{patrol_id}",
+    response_model=PatrolResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_patrol(patrol_id: uuid.UUID, db: Session = Depends(get_db)) -> PatrolResponse:
     record = db.get(Patrol, patrol_id)
     if not record:
@@ -71,7 +80,12 @@ def get_patrol(patrol_id: uuid.UUID, db: Session = Depends(get_db)) -> PatrolRes
     return PatrolResponse.model_validate(record)
 
 
-@router.post("", response_model=PatrolResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=PatrolResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def create_patrol(
     payload: PatrolCreate, db: Session = Depends(get_db)
 ) -> PatrolResponse:
@@ -110,7 +124,11 @@ def create_patrol(
     return PatrolResponse.model_validate(record)
 
 
-@router.put("/{patrol_id}", response_model=PatrolResponse)
+@router.put(
+    "/{patrol_id}",
+    response_model=PatrolResponse,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def update_patrol(
     patrol_id: uuid.UUID,
     payload: PatrolUpdate,
@@ -144,7 +162,7 @@ def update_patrol(
     return PatrolResponse.model_validate(record)
 
 
-@router.delete("/{patrol_id}")
+@router.delete("/{patrol_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_patrol(patrol_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     record = db.get(Patrol, patrol_id)
     if not record:

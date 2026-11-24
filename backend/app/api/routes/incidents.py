@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Incident
 from app.schemas.common import PaginatedResponse
 from app.schemas.incident import IncidentCreate, IncidentResponse, IncidentUpdate
@@ -15,7 +16,11 @@ from app.services.spatial import make_point_geom, resolve_village_id
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
 
-@router.get("", response_model=PaginatedResponse[IncidentResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[IncidentResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_incidents(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -76,7 +81,11 @@ def list_incidents(
     )
 
 
-@router.get("/{incident_id}", response_model=IncidentResponse)
+@router.get(
+    "/{incident_id}",
+    response_model=IncidentResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> IncidentResponse:
     record = db.get(Incident, incident_id)
     if not record:
@@ -84,7 +93,12 @@ def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> Incid
     return IncidentResponse.model_validate(record)
 
 
-@router.post("", response_model=IncidentResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=IncidentResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def create_incident(
     payload: IncidentCreate, db: Session = Depends(get_db)
 ) -> IncidentResponse:
@@ -128,7 +142,11 @@ def create_incident(
     return IncidentResponse.model_validate(record)
 
 
-@router.put("/{incident_id}", response_model=IncidentResponse)
+@router.put(
+    "/{incident_id}",
+    response_model=IncidentResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def update_incident(
     incident_id: uuid.UUID,
     payload: IncidentUpdate,
@@ -160,7 +178,7 @@ def update_incident(
     return IncidentResponse.model_validate(record)
 
 
-@router.delete("/{incident_id}")
+@router.delete("/{incident_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     record = db.get(Incident, incident_id)
     if not record:

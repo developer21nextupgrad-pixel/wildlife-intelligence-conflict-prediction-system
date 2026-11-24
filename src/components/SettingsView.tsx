@@ -5,6 +5,7 @@ import {
   SystemSettings,
 } from '../services/apiBridge';
 import { isValidHttpApiUrl, normalizeApiBaseUrl } from '../utils/apiConfig';
+import { AuthenticatedUserProfile, canManageAdmin } from '../utils/authStorage';
 import {
   Server,
   Volume2,
@@ -16,6 +17,7 @@ import {
 } from 'lucide-react';
 
 interface SettingsViewProps {
+  currentUser?: AuthenticatedUserProfile | null;
   settings: SystemSettings;
   onUpdateSettings: (settings: Partial<SystemSettings>) => Promise<void>;
   onResetData: () => Promise<void>;
@@ -25,6 +27,7 @@ interface SettingsViewProps {
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
+  currentUser = null,
   settings,
   onUpdateSettings,
   onResetData,
@@ -113,6 +116,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
     try {
       const health = await apiBridge.checkHealth(testedUrl);
+      if (!canManageAdmin(currentUser)) {
+        setApiTestResult({
+          ok: true,
+          testedUrl,
+          message: `Connected to ${health.service} v${health.version} (Admin role required for DB table diagnostics)`,
+        });
+        return;
+      }
       const dbHealth = await apiBridge.checkDatabaseHealth(testedUrl);
       setApiTestResult({
         ok: true,

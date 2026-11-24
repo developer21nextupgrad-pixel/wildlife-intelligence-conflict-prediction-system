@@ -1,7 +1,17 @@
 from datetime import datetime
 import uuid
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -45,3 +55,27 @@ class Sighting(TimestampMixin, DemoFlagMixin, Base):
     observer_role: Mapped[str] = mapped_column(String(120), nullable=False)
     verified_by_forest_guard: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     photo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Phase 2/3 additive intelligence links
+    animal_detection_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("animal_detections.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+    )
+    animal_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("animal_identities.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+    )
+    camera_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("cameras.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    village_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("villages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    external_ref_key: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, unique=True, index=True
+    )
+

@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Alert
 from app.schemas.alert import AlertCreate, AlertResponse, AlertUpdate
 from app.schemas.common import PaginatedResponse
@@ -15,7 +16,11 @@ from app.services.spatial import make_point_geom, resolve_village_id
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
 
-@router.get("", response_model=PaginatedResponse[AlertResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[AlertResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_alerts(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -71,7 +76,11 @@ def list_alerts(
     )
 
 
-@router.get("/{alert_id}", response_model=AlertResponse)
+@router.get(
+    "/{alert_id}",
+    response_model=AlertResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db)) -> AlertResponse:
     record = db.get(Alert, alert_id)
     if not record:
@@ -79,7 +88,12 @@ def get_alert(alert_id: uuid.UUID, db: Session = Depends(get_db)) -> AlertRespon
     return AlertResponse.model_validate(record)
 
 
-@router.post("", response_model=AlertResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=AlertResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def create_alert(payload: AlertCreate, db: Session = Depends(get_db)) -> AlertResponse:
     now = datetime.now(timezone.utc)
     village_id = resolve_village_id(db, payload.village_id, payload.affected_village)
@@ -113,7 +127,11 @@ def create_alert(payload: AlertCreate, db: Session = Depends(get_db)) -> AlertRe
     return AlertResponse.model_validate(record)
 
 
-@router.put("/{alert_id}", response_model=AlertResponse)
+@router.put(
+    "/{alert_id}",
+    response_model=AlertResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def update_alert(
     alert_id: uuid.UUID,
     payload: AlertUpdate,
@@ -150,7 +168,7 @@ def update_alert(
     return AlertResponse.model_validate(record)
 
 
-@router.delete("/{alert_id}")
+@router.delete("/{alert_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_alert(alert_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     record = db.get(Alert, alert_id)
     if not record:

@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal, is_postgres_backend
 from app.models import (
     Alert,
+    AlertRule,
+    ForestOfficer,
     Incident,
     Patrol,
     RiskZone,
@@ -34,6 +36,8 @@ def seed_demo_data(db: Session) -> dict[str, int]:
         "alerts": 0,
         "patrols": 0,
         "telemetry_records": 0,
+        "forest_officers": 0,
+        "alert_rules": 0,
     }
 
     village_defs = [
@@ -816,6 +820,132 @@ def seed_demo_data(db: Session) -> dict[str, int]:
         )
         db.add(t)
         inserted["telemetry_records"] += 1
+
+    # Phase 3: Forest Officers roster (no fabricated phone numbers; opt-in channels default disabled)
+    officer_defs = [
+        {
+            "name": "RFO Suresh Kumar",
+            "badge_number": "KFD-BDP-RFO-101",
+            "role": "Range Forest Officer (RFO)",
+            "forest_range": "Hediyala Range",
+            "district": "Bandipur Division",
+            "latitude": 11.6635,
+            "longitude": 76.6205,
+            "whatsapp_opt_in": False,
+            "sms_opt_in": False,
+            "contact_channel": "whatsapp_stub",
+            "duty_status": "On Duty",
+            "on_duty": True,
+            "notification_enabled": True,
+        },
+        {
+            "name": "Dr. Anjali Rao",
+            "badge_number": "KFD-BDP-VET-104",
+            "role": "Wildlife Biologist & Vet",
+            "forest_range": "Gundlupet Buffer",
+            "district": "Bandipur Division",
+            "latitude": 11.6885,
+            "longitude": 76.6420,
+            "whatsapp_opt_in": False,
+            "sms_opt_in": False,
+            "contact_channel": "whatsapp_stub",
+            "duty_status": "On Duty",
+            "on_duty": True,
+            "notification_enabled": True,
+        },
+        {
+            "name": "Beat Guard M. Basavaraj",
+            "badge_number": "KFD-BDP-BG-209",
+            "role": "Beat Guard",
+            "forest_range": "Omkar Range",
+            "district": "Bandipur Division",
+            "latitude": 11.6400,
+            "longitude": 76.5900,
+            "whatsapp_opt_in": False,
+            "sms_opt_in": False,
+            "contact_channel": "sms_stub",
+            "duty_status": "Patrol Active",
+            "on_duty": True,
+            "notification_enabled": True,
+        },
+        {
+            "name": "RFO R. Nair",
+            "badge_number": "KFD-BDP-RFO-108",
+            "role": "Range Forest Officer (RFO)",
+            "forest_range": "Maddur Range",
+            "district": "Bandipur Division",
+            "latitude": 11.7110,
+            "longitude": 76.6260,
+            "whatsapp_opt_in": False,
+            "sms_opt_in": False,
+            "contact_channel": "whatsapp_stub",
+            "duty_status": "On Duty",
+            "on_duty": True,
+            "notification_enabled": True,
+        },
+    ]
+    for o_def in officer_defs:
+        exists = db.execute(
+            select(ForestOfficer).where(ForestOfficer.badge_number == o_def["badge_number"])
+        ).scalar_one_or_none()
+        if exists:
+            continue
+        db.add(ForestOfficer(**o_def))
+        inserted["forest_officers"] += 1
+
+    # Phase 3: Configurable Alert Rules (only trigger on detections matching species/zone/repeat criteria)
+    rule_defs = [
+        {
+            "name": "Bengal Tiger Perimeter Alert",
+            "species_filter": "Bengal Tiger",
+            "risk_level": "Critical",
+            "village_id": None,
+            "zone_name": None,
+            "min_repeat_count": 1,
+            "time_window_minutes": 180,
+            "min_species_confidence": 0.60,
+            "enabled": True,
+            "auto_notify_officer": True,
+            "auto_dispatch_iot_boundary": True,
+            "description": "Triggers immediately when a Bengal Tiger is identified near a camera or fringe settlement above 60% confidence.",
+        },
+        {
+            "name": "Repeat Individual Elephant Boundary Approach",
+            "species_filter": "Asian Elephant",
+            "risk_level": "High",
+            "village_id": None,
+            "zone_name": None,
+            "min_repeat_count": 2,
+            "time_window_minutes": 120,
+            "min_species_confidence": 0.50,
+            "enabled": True,
+            "auto_notify_officer": True,
+            "auto_dispatch_iot_boundary": True,
+            "description": "Triggers when the same individual Asian Elephant (via Re-ID) is sighted >=2 times within 120 minutes near settlements.",
+        },
+        {
+            "name": "Indian Leopard Livestock Corridor Alert",
+            "species_filter": "Indian Leopard",
+            "risk_level": "High",
+            "village_id": None,
+            "zone_name": None,
+            "min_repeat_count": 1,
+            "time_window_minutes": 180,
+            "min_species_confidence": 0.55,
+            "enabled": True,
+            "auto_notify_officer": True,
+            "auto_dispatch_iot_boundary": False,
+            "description": "Triggers for Indian Leopard detections near monitored fringe zones.",
+        },
+    ]
+    for r_def in rule_defs:
+        exists = db.execute(
+            select(AlertRule).where(AlertRule.name == r_def["name"])
+        ).scalar_one_or_none()
+        if exists:
+            continue
+        db.add(AlertRule(**r_def))
+        inserted["alert_rules"] += 1
 
     db.commit()
     logger.info("Demo seeding complete: %s", inserted)

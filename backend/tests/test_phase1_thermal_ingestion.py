@@ -71,12 +71,10 @@ def _make_synthetic_thermal_avi(
 
 @pytest.fixture()
 def phase1_client(db_session, tmp_path: Path):
+    from conftest import auth_headers, make_test_settings
+
     storage = FilesystemObjectStorage(tmp_path / "object_store")
-    settings = Settings(
-        environment="test",
-        auto_seed_demo_data=False,
-        rate_limit_requests=500,
-        rate_limit_window_seconds=60,
+    settings = make_test_settings(
         storage_backend="filesystem",
         local_storage_dir=str(tmp_path / "object_store"),
     )
@@ -85,6 +83,7 @@ def phase1_client(db_session, tmp_path: Path):
     app.dependency_overrides[get_storage_backend] = lambda: storage
 
     with TestClient(app) as test_client:
+        test_client.headers.update(auth_headers(settings, role="admin"))
         yield test_client, storage
     app.dependency_overrides.clear()
 
@@ -364,8 +363,10 @@ def test_video_fps_extraction_and_filtering(phase1_client):
     assert filtered.json()["total"] == data["extracted_count"]
 
 
-def test_rtsp_test_pull_validation_and_credential_masking(phase1_client):
-    client, _storage = phase1_client
+def test_rtsp_test_pull_validation_and_credential_masking(phase1_client, db_session, tmp_path: Path):
+    from conftest import auth_headers, make_test_settings
+
+    client, storage = phase1_client
 
     bad_scheme = client.post(
         "/api/v1/ingest/rtsp/test-pull",
@@ -373,8 +374,8 @@ def test_rtsp_test_pull_validation_and_credential_masking(phase1_client):
     )
     assert bad_scheme.status_code == 422
 
-    # Closed local port fails quickly with 502 and masked credentials
-    unreachable = client.post(
+    # Loopback RTSP target is blocked by default SSRF guard
+    blocked_ssrf = client.post(
         "/api/v1/ingest/rtsp/test-pull",
         json={
             "rtsp_url": "rtsp://admin:topsecret@127.0.0.1:19554/live",
@@ -382,10 +383,33 @@ def test_rtsp_test_pull_validation_and_credential_masking(phase1_client):
             "timeout_seconds": 1.5,
         },
     )
-    assert unreachable.status_code == 502
-    detail = unreachable.json()["detail"]
-    assert "topsecret" not in detail
-    assert "***:***" in detail
+    assert blocked_ssrf.status_code == 422
+    assert "ssrf protection" in blocked_ssrf.json()["detail"].lower()
+
+    # Explicitly allowlisted RTSP host fails cleanly on closed port with 502 and masked credentials
+    allow_settings = make_test_settings(
+        storage_backend="filesystem",
+        local_storage_dir=str(tmp_path / "rtsp_allow_store"),
+        rtsp_allowed_hosts="127.0.0.1",
+    )
+    app2 = create_application(allow_settings)
+    app2.dependency_overrides[get_db] = lambda: db_session
+    app2.dependency_overrides[get_storage_backend] = lambda: storage
+    with TestClient(app2) as allow_client:
+        allow_client.headers.update(auth_headers(allow_settings, role="operator"))
+        unreachable = allow_client.post(
+            "/api/v1/ingest/rtsp/test-pull",
+            json={
+                "rtsp_url": "rtsp://admin:topsecret@127.0.0.1:19554/live",
+                "max_frames": 2,
+                "timeout_seconds": 1.5,
+            },
+        )
+        assert unreachable.status_code == 502
+        detail = unreachable.json()["detail"]
+        assert "topsecret" not in detail
+        assert "***:***" in detail
+    app2.dependency_overrides.clear()
 
 
 def test_storage_path_traversal_and_s3_adapter_contract(tmp_path: Path, monkeypatch):
@@ -497,27 +521,44 @@ def test_alembic_upgrade_0001_and_0002_on_sqlite(tmp_path: Path, monkeypatch):
         command.downgrade(cfg, "0001_initial_schema")
         command.upgrade(cfg, "0002_cameras_and_thermal_frames")
         command.upgrade(cfg, "0003_thermal_delete")
-        command.downgrade(cfg, "0002_cameras_and_thermal_frames")
+        command.upgrade(cfg, "0004_animal_detections")
+        command.downgrade(cfg, "0003_thermal_delete")
         command.upgrade(cfg, "head")
     finally:
         get_settings.cache_clear()
 
 
-def test_cors_allows_x_camera_key_and_vercel_origin(phase1_client):
-    client, _storage = phase1_client
-    vercel_origin = "https://wicps-command-preview.vercel.app"
-    preflight = client.options(
-        "/api/v1/ingest/frames",
-        headers={
-            "Origin": vercel_origin,
-            "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "X-Camera-Key, Content-Type",
-        },
-    )
-    assert preflight.status_code == 200
-    assert preflight.headers.get("access-control-allow-origin") == vercel_origin
-    allowed_headers = preflight.headers.get("access-control-allow-headers", "").lower()
-    assert "x-camera-key" in allowed_headers
+def test_cors_allows_x_camera_key_and_vercel_origin(db_session):
+    from conftest import make_test_settings
+
+    approved_origin = "https://wicps-command-preview.vercel.app"
+    settings = make_test_settings(cors_origins=f"http://localhost:3000,{approved_origin}")
+    app = create_application(settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/api/v1/ingest/frames",
+            headers={
+                "Origin": approved_origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "X-Camera-Key, Content-Type",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers.get("access-control-allow-origin") == approved_origin
+        allowed_headers = preflight.headers.get("access-control-allow-headers", "").lower()
+        assert "x-camera-key" in allowed_headers
+
+        # Unlisted preview origin is rejected by strict CORS allowlist
+        unlisted = client.options(
+            "/api/v1/ingest/frames",
+            headers={
+                "Origin": "https://unlisted-random-preview.vercel.app",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        assert unlisted.status_code == 400
+    app.dependency_overrides.clear()
 
 
 def test_production_config_disallows_sqlite_and_filesystem_fallbacks():
@@ -528,6 +569,8 @@ def test_production_config_disallows_sqlite_and_filesystem_fallbacks():
         database_url="sqlite:///./wicps_dev.db",
         storage_backend="s3",
         s3_bucket="wicps-bucket",
+        auth_jwt_secret="prod-only-test-jwt-secret-minimum-32-chars",
+        cors_origins="https://wicps.example.com",
     )
     with pytest.raises(RuntimeError, match="DATABASE_URL"):
         sqlite_prod.validate_production_requirements()
@@ -536,6 +579,8 @@ def test_production_config_disallows_sqlite_and_filesystem_fallbacks():
         environment="production",
         database_url="postgresql+psycopg://user:pass@ep-cool.neon.tech/wicps?sslmode=require",
         storage_backend="filesystem",
+        auth_jwt_secret="prod-only-test-jwt-secret-minimum-32-chars",
+        cors_origins="https://wicps.example.com",
     )
     with pytest.raises(RuntimeError, match="STORAGE_BACKEND=s3"):
         fs_prod.validate_production_requirements()
@@ -545,6 +590,8 @@ def test_production_config_disallows_sqlite_and_filesystem_fallbacks():
         database_url="postgresql+psycopg://user:pass@ep-cool.neon.tech/wicps?sslmode=require",
         storage_backend="s3",
         s3_bucket="wicps-thermal-prod",
+        auth_jwt_secret="prod-only-test-jwt-secret-minimum-32-chars",
+        cors_origins="https://wicps.example.com",
     )
     valid_prod.validate_production_requirements()
 
@@ -671,6 +718,8 @@ def test_tigris_s3_client_config_checksums_virtual_addressing_and_region_default
         s3_bucket=" wicps-thermal ",
         s3_access_key_id=" tid_test_key ",
         s3_secret_access_key=" tsec_test_secret ",
+        auth_jwt_secret="prod-only-test-jwt-secret-minimum-32-chars",
+        cors_origins="https://wicps.example.com",
     )
     settings.validate_production_requirements()
     assert settings.s3_region == "auto"
@@ -799,7 +848,9 @@ def test_s3_put_bytes_error_logging_redacts_secrets_and_end_to_end_db_persistenc
     assert secret_val not in log_output
     assert access_val not in log_output
 
-    settings = Settings(environment="test", auto_seed_demo_data=False)
+    from conftest import auth_headers, make_test_settings
+
+    settings = make_test_settings()
     app = create_application(settings)
     app.dependency_overrides[get_db] = lambda: db_session
     app.dependency_overrides[get_storage_backend] = lambda: s3
@@ -810,6 +861,7 @@ def test_s3_put_bytes_error_logging_redacts_secrets_and_end_to_end_db_persistenc
 
     try:
         with TestClient(app) as client:
+            client.headers.update(auth_headers(settings, role="admin"))
             health = client.get("/api/v1/health/storage")
             assert health.status_code == 200
             health_json = health.json()

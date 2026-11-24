@@ -1,4 +1,5 @@
 from functools import lru_cache
+import secrets
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,14 +28,28 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://wicps_user:wicps_dev_password@localhost:5432/wicps"
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
-    cors_origin_regex: str = (
-        r"^https://(ais-[a-z0-9-]+\.[a-z0-9.-]+\.run\.app"
-        r"|[a-z0-9-]+\.scf\.usercontent\.goog"
-        r"|[a-z0-9-]+\.vercel\.app)$"
-    )
+    # Restrictive by default: explicit production/preview origins must be listed via CORS_ORIGINS.
+    cors_origin_regex: str = ""
 
     rate_limit_requests: int = 120
     rate_limit_window_seconds: int = 60
+    auth_login_rate_limit_requests: int = 15
+    auth_login_rate_limit_window_seconds: int = 60
+    rate_limit_redis_url: str | None = None
+
+    # Phase A Security: JWT / OIDC Authentication & RBAC
+    auth_enabled: bool = True
+    auth_jwt_secret: str | None = None
+    auth_jwt_issuer: str = "wicps-api"
+    auth_jwt_audience: str = "wicps-console"
+    auth_jwt_expire_minutes: int = 480
+    auth_oidc_issuer: str | None = None
+    auth_oidc_audience: str | None = None
+    auth_oidc_jwks_url: str | None = None
+    auth_role_claim: str = "roles"
+    auth_bootstrap_admin_email: str | None = None
+    auth_bootstrap_admin_password: str | None = None
+    auth_bootstrap_admin_name: str = "Division Administrator"
 
     auto_seed_demo_data: bool = False
     # Security safeguard: never expose sensitive animal telemetry GPS coordinates publicly.
@@ -57,16 +72,49 @@ class Settings(BaseSettings):
     max_video_frames: int = 150
     rtsp_test_timeout_seconds: float = 8.0
     rtsp_test_max_frames: int = 5
+    rtsp_allowed_hosts: str = ""
+
+    # Phase 1 Animal Detection & Species Identification (MegaDetector + Google SpeciesNet)
+    speciesnet_model: str = "kaggle:google/speciesnet/pyTorch/v4.0.3a/1"
+    speciesnet_default_country: str | None = "IND"
+    speciesnet_default_admin1_region: str | None = None
+    speciesnet_geofence_enabled: bool = True
+    speciesnet_min_detection_confidence: float = 0.20
+    speciesnet_min_species_confidence: float = 0.50
+    speciesnet_max_detections_per_image: int = 25
+    speciesnet_preload_on_startup: bool = False
+
+    # Phase 2: Individual Animal Re-Identification (BVRA MegaDescriptor + pgvector)
+    megadescriptor_enabled: bool = True
+    megadescriptor_model: str = "hf-hub:BVRA/MegaDescriptor-T-224"
+    megadescriptor_embedding_dim: int = 768
+    reid_match_threshold: float = 0.75
+    reid_ambiguous_threshold: float = 0.55
+    reid_margin_threshold: float = 0.04
+    reid_min_crop_px: int = 48
+    reid_min_blur_laplacian: float = 25.0
+    megadescriptor_preload_on_startup: bool = False
+
+    # Phase 3: Notification provider mode & IoT boundary contract settings
+    notification_provider_mode: str = "stub"  # "stub" | "webhook_disabled"
+    default_sighting_repeat_window_minutes: int = 120
 
     @field_validator(
         "s3_endpoint_url",
         "s3_bucket",
         "s3_access_key_id",
         "s3_secret_access_key",
+        "auth_jwt_secret",
+        "auth_oidc_issuer",
+        "auth_oidc_audience",
+        "auth_oidc_jwks_url",
+        "auth_bootstrap_admin_email",
+        "auth_bootstrap_admin_password",
+        "rate_limit_redis_url",
         mode="before",
     )
     @classmethod
-    def normalize_optional_s3_strings(cls, value: str | None) -> str | None:
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
         return _clean_optional_str(value)
 
     @field_validator("s3_region", mode="before")
@@ -75,7 +123,7 @@ class Settings(BaseSettings):
         return _clean_optional_str(value) or ""
 
     @model_validator(mode="after")
-    def apply_s3_provider_defaults(self) -> "Settings":
+    def apply_defaults(self) -> "Settings":
         if self.s3_endpoint_url:
             self.s3_endpoint_url = self.s3_endpoint_url.rstrip("/") or None
         endpoint = (self.s3_endpoint_url or "").lower()
@@ -87,16 +135,22 @@ class Settings(BaseSettings):
             self.s3_region = "auto" if is_tigris_or_r2 else "us-east-1"
         elif is_tigris_or_r2 and "s3_region" not in self.model_fields_set:
             self.s3_region = "auto"
+
+        # Generate an ephemeral CSPRNG signing key strictly for non-production runs when unset.
+        # Production requires an explicit AUTH_JWT_SECRET (>= 32 chars) or OIDC JWKS configuration.
+        if self.environment.strip().lower() != "production" and not self.auth_jwt_secret:
+            self.auth_jwt_secret = secrets.token_urlsafe(48)
+
         return self
 
-    @field_validator("rate_limit_requests")
+    @field_validator("rate_limit_requests", "auth_login_rate_limit_requests")
     @classmethod
     def validate_rate_limit_requests(cls, value: int) -> int:
         if value < 1:
             raise ValueError("rate_limit_requests must be >= 1")
         return value
 
-    @field_validator("rate_limit_window_seconds")
+    @field_validator("rate_limit_window_seconds", "auth_login_rate_limit_window_seconds")
     @classmethod
     def validate_rate_limit_window(cls, value: int) -> int:
         if value < 1:
@@ -111,12 +165,22 @@ class Settings(BaseSettings):
         return value
 
     @property
+    def is_production(self) -> bool:
+        return self.environment.strip().lower() == "production"
+
+    @property
     def cors_origins_list(self) -> list[str]:
-        origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
-        return origins or ["http://localhost:3000"]
+        origins = [origin.strip().rstrip("/") for origin in self.cors_origins.split(",") if origin.strip()]
+        if origins:
+            return origins
+        return [] if self.is_production else ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    @property
+    def rtsp_allowed_hosts_set(self) -> set[str]:
+        return {h.strip().lower() for h in self.rtsp_allowed_hosts.split(",") if h.strip()}
 
     def validate_production_requirements(self) -> None:
-        if self.environment.strip().lower() != "production":
+        if not self.is_production:
             return
 
         db_url = (self.database_url or "").strip().lower()
@@ -140,7 +204,34 @@ class Settings(BaseSettings):
                 "Production configuration error: S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must both be configured together."
             )
 
+        if not self.auth_enabled:
+            raise RuntimeError(
+                "Production configuration error: AUTH_ENABLED cannot be disabled in production."
+            )
+
+        has_hs256 = bool(self.auth_jwt_secret and len(self.auth_jwt_secret) >= 32)
+        has_oidc = bool(self.auth_oidc_jwks_url and self.auth_oidc_issuer)
+        if not has_hs256 and not has_oidc:
+            raise RuntimeError(
+                "Production configuration error: configure AUTH_JWT_SECRET (min 32 chars) and/or OIDC (AUTH_OIDC_JWKS_URL + AUTH_OIDC_ISSUER)."
+            )
+
+        origins = self.cors_origins_list
+        if "*" in origins:
+            raise RuntimeError(
+                "Production configuration error: wildcard '*' in CORS_ORIGINS is disallowed with credentials enabled."
+            )
+        if not origins and not (self.cors_origin_regex or "").strip():
+            raise RuntimeError(
+                "Production configuration error: CORS_ORIGINS must specify explicit allowed frontend origins."
+            )
+        if self.cors_origin_regex and ("vercel.app" in self.cors_origin_regex and "\\." in self.cors_origin_regex and "[a-z0-9-]+" in self.cors_origin_regex):
+            raise RuntimeError(
+                "Production configuration error: wildcard '*.vercel.app' CORS_ORIGIN_REGEX is disallowed."
+            )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+

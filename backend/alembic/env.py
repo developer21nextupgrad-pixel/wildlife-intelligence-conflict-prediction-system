@@ -1,4 +1,5 @@
 from logging.config import fileConfig
+import os
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -11,8 +12,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+db_url = os.environ.get("DATABASE_URL") or get_settings().database_url
+config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
 

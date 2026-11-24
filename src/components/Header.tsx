@@ -11,9 +11,12 @@ import {
   MapPin,
 } from 'lucide-react';
 import { AlertNotification } from '../types';
+import { AuthenticatedUserProfile, getUserInitials } from '../utils/authStorage';
 import { DATE_RANGE_OPTIONS, DIVISION_OPTIONS } from '../utils/wicpsFilters';
 
 interface HeaderProps {
+  currentUser: AuthenticatedUserProfile;
+  onLogout: () => void;
   setActiveTab: (tab: string) => void;
   onNavigateAdmin: (subTab: 'personnel' | 'bridge') => void;
   unacknowledgedAlerts: AlertNotification[];
@@ -28,6 +31,8 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  currentUser,
+  onLogout,
   setActiveTab,
   onNavigateAdmin,
   unacknowledgedAlerts,
@@ -81,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="bg-gradient-to-r from-red-700 via-red-600 to-red-800 text-white px-4 py-1.5 text-xs font-semibold flex items-center justify-between">
           <div className="flex items-center space-x-2 truncate">
             <span className="bg-white text-red-700 uppercase px-1.5 py-0.5 rounded text-[10px] tracking-wider font-extrabold flex items-center gap-1">
-              <Flame className="w-3 h-3 text-red-600" /> ACTIVE ALERT (DEMO)
+              <Flame className="w-3 h-3 text-red-600" /> ACTIVE ALERT
             </span>
             <span className="truncate">
               {criticalAlerts[0].title}: {criticalAlerts[0].affectedVillage} ({criticalAlerts[0].species})
@@ -109,7 +114,7 @@ export const Header: React.FC<HeaderProps> = ({
                 Forest Dept • Uttar Pradesh • India
               </span>
               <span className="hidden xl:inline-block bg-slate-900 text-slate-300 border border-slate-700/80 text-[9px] px-1.5 py-0.2 rounded font-mono shrink-0">
-                GIS COMMAND • PROTOTYPE
+                GIS COMMAND
               </span>
             </div>
             <h1 className="text-sm xl:text-base font-extrabold tracking-tight text-white flex items-center gap-1.5 truncate">
@@ -281,44 +286,67 @@ export const Header: React.FC<HeaderProps> = ({
           {/* User Profile Pill & Dropdown */}
           <div className="relative">
             <button
+              type="button"
+              aria-label="Open user session menu"
               onClick={() => setIsProfileOpen(!isProfileOpen)}
               className="flex items-center space-x-2 pl-2 border-l border-slate-800 text-xs hover:opacity-90 transition"
             >
               <div className="w-7 h-7 rounded-full bg-emerald-800/80 border border-emerald-400/50 flex items-center justify-center text-emerald-200 font-bold font-mono text-xs shadow-inner">
-                DO
+                {getUserInitials(currentUser.displayName)}
               </div>
               <div className="hidden md:block text-left leading-tight">
-                <div className="font-semibold text-slate-200">Demo Duty Officer</div>
-                <div className="text-[10px] text-emerald-400">DFO Session (Demo)</div>
+                <div className="font-semibold text-slate-200 max-w-[140px] truncate">
+                  {currentUser.displayName}
+                </div>
+                <div className="text-[10px] text-emerald-400 font-mono uppercase">
+                  {currentUser.role}
+                </div>
               </div>
             </button>
 
             {isProfileOpen && (
               <div className="absolute right-0 top-11 w-64 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 overflow-hidden text-xs text-slate-300 animate-in fade-in">
                 <div className="p-3.5 bg-slate-950 border-b border-slate-800">
-                  <div className="font-bold text-white">Demo Duty Officer</div>
-                  <div className="text-emerald-400 text-[11px]">Divisional Forest Officer (Demo Role)</div>
-                  <div className="text-slate-400 text-[10px] font-mono mt-0.5">Session: Local Prototype</div>
+                  <div className="font-bold text-white truncate">{currentUser.displayName}</div>
+                  <div className="text-emerald-400 text-[11px] font-mono uppercase mt-0.5">
+                    Role: {currentUser.role}
+                  </div>
+                  <div className="text-slate-400 text-[10px] font-mono mt-0.5 truncate">
+                    {currentUser.email || currentUser.subject}
+                  </div>
                 </div>
 
                 <div className="p-2 space-y-1">
                   <button
+                    type="button"
                     onClick={() => {
                       onNavigateAdmin('personnel');
                       setIsProfileOpen(false);
                     }}
                     className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-slate-800 transition"
                   >
-                    Officer Directory & Staff
+                    Personnel &amp; RBAC Accounts
                   </button>
                   <button
+                    type="button"
                     onClick={() => {
                       onNavigateAdmin('bridge');
                       setIsProfileOpen(false);
                     }}
                     className="w-full text-left px-3 py-1.5 rounded-lg hover:bg-slate-800 transition"
                   >
-                    System Architecture & API Bridge
+                    System Architecture &amp; API Bridge
+                  </button>
+                  <div className="border-t border-slate-800 my-1" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsProfileOpen(false);
+                      onLogout();
+                    }}
+                    className="w-full text-left px-3 py-1.5 rounded-lg text-red-300 hover:bg-red-950/60 font-semibold transition"
+                  >
+                    Sign Out
                   </button>
                 </div>
               </div>

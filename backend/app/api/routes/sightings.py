@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Sighting
 from app.schemas.common import PaginatedResponse
 from app.schemas.sighting import SightingCreate, SightingResponse, SightingUpdate
@@ -20,7 +21,11 @@ from app.services.spatial import make_point_geom
 router = APIRouter(prefix="/sightings", tags=["Sightings"])
 
 
-@router.get("", response_model=PaginatedResponse[SightingResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[SightingResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_sightings(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -75,7 +80,11 @@ def list_sightings(
     )
 
 
-@router.get("/{sighting_id}", response_model=SightingResponse)
+@router.get(
+    "/{sighting_id}",
+    response_model=SightingResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_sighting(sighting_id: uuid.UUID, db: Session = Depends(get_db)) -> SightingResponse:
     record = db.get(Sighting, sighting_id)
     if not record:
@@ -83,7 +92,12 @@ def get_sighting(sighting_id: uuid.UUID, db: Session = Depends(get_db)) -> Sight
     return SightingResponse.model_validate(record)
 
 
-@router.post("", response_model=SightingResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=SightingResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def create_sighting(
     payload: SightingCreate, db: Session = Depends(get_db)
 ) -> SightingResponse:
@@ -122,7 +136,11 @@ def create_sighting(
     return SightingResponse.model_validate(record)
 
 
-@router.put("/{sighting_id}", response_model=SightingResponse)
+@router.put(
+    "/{sighting_id}",
+    response_model=SightingResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def update_sighting(
     sighting_id: uuid.UUID,
     payload: SightingUpdate,
@@ -149,7 +167,7 @@ def update_sighting(
     return SightingResponse.model_validate(record)
 
 
-@router.delete("/{sighting_id}")
+@router.delete("/{sighting_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_sighting(sighting_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     record = db.get(Sighting, sighting_id)
     if not record:

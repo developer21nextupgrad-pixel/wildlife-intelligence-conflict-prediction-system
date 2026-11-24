@@ -18,6 +18,12 @@ import {
   validateThermalSampleFile,
 } from '../utils/apiMappers';
 import {
+  AuthenticatedUserProfile,
+  canManageAdmin,
+  getStoredAuthToken,
+} from '../utils/authStorage';
+import { AuthImage } from './AuthImage';
+import {
   Activity,
   AlertTriangle,
   Camera as CameraIcon,
@@ -45,6 +51,7 @@ import {
 } from 'lucide-react';
 
 interface ThermalIngestionViewProps {
+  currentUser?: AuthenticatedUserProfile | null;
   villages: VillageRiskProfile[];
 }
 
@@ -124,7 +131,11 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ villages }) => {
+export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({
+  currentUser = null,
+  villages,
+}) => {
+  const isAdmin = canManageAdmin(currentUser);
   const [cameras, setCameras] = useState<ThermalCamera[]>([]);
   const [frames, setFrames] = useState<ThermalFrameRecord[]>([]);
   const [totalFrames, setTotalFrames] = useState<number>(0);
@@ -300,6 +311,7 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
 
   // --- Camera Registration Handlers ---
   const handleOpenRegisterModal = () => {
+    if (!isAdmin) return;
     setCameraForm(buildEmptyCameraForm());
     setCameraFormError(null);
     setIsRegisterModalOpen(true);
@@ -391,6 +403,7 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
   };
 
   const handleOpenDeleteCameraModal = (camera: ThermalCamera) => {
+    if (!isAdmin) return;
     setCameraDeleteError(null);
     setCameraPendingDelete(camera);
   };
@@ -617,6 +630,33 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
       ? apiBridge.getThermalFrameImageUrl(selectedFrame.id, 'processed', false)
       : '';
 
+  const handleAuthenticatedDownload = async (url: string, filename: string) => {
+    if (!url) return;
+    try {
+      const token = getStoredAuthToken();
+      const res = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: Failed to download thermal artifact`);
+      }
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (err) {
+      setNoticeBanner({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unable to download thermal artifact.',
+      });
+    }
+  };
+
   const activeEndpointUrl = apiBridge.getApiBaseUrl();
 
   return (
@@ -640,8 +680,10 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <button
             type="button"
+            disabled={!isAdmin}
+            title={isAdmin ? 'Register Camera' : 'Admin role required to register cameras'}
             onClick={handleOpenRegisterModal}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-sm transition cursor-pointer"
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-bold rounded-xl shadow-sm transition cursor-pointer disabled:cursor-not-allowed"
           >
             <Plus className="w-4 h-4" />
             <span>Register Camera</span>
@@ -906,11 +948,12 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                       <select
                         aria-label={`Status for ${cam.cameraCode}`}
                         value={cam.status}
-                        disabled={updatingCameraId === cam.id}
+                        disabled={!isAdmin || updatingCameraId === cam.id}
+                        title={isAdmin ? 'Update camera status' : 'Admin role required'}
                         onChange={(e) =>
                           handleCameraStatusChange(cam.id, e.target.value as CameraStatus)
                         }
-                        className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
+                        className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                       >
                         <option value="active">active</option>
                         <option value="maintenance">maintenance</option>
@@ -941,10 +984,11 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                         </button>
                         <button
                           type="button"
+                          disabled={!isAdmin}
                           onClick={() => handleOpenDeleteCameraModal(cam)}
                           aria-label={`Delete camera ${cam.cameraCode}`}
-                          title={`Delete ${cam.cameraCode}`}
-                          className="inline-flex items-center gap-1 px-2 py-1 bg-red-950/70 hover:bg-red-900/80 text-red-300 border border-red-800/60 rounded-md text-[11px] font-medium transition cursor-pointer"
+                          title={isAdmin ? `Delete ${cam.cameraCode}` : 'Admin role required'}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-red-950/70 hover:bg-red-900/80 disabled:opacity-40 text-red-300 border border-red-800/60 rounded-md text-[11px] font-medium transition cursor-pointer disabled:cursor-not-allowed"
                         >
                           <Trash2 className="w-3 h-3" />
                           <span>Delete</span>
@@ -1348,7 +1392,7 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                           Unable to decode browser preview for raw thermal artifact.
                         </div>
                       ) : (
-                        <img
+                        <AuthImage
                           src={rawImageUrl}
                           alt={`Original thermal frame ${selectedFrame.sourceFilename || selectedFrame.id}`}
                           onError={() =>
@@ -1367,14 +1411,19 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                           ? '8-bit display copy (16-bit TIFF intact)'
                           : 'Raw frame bytes'}
                       </span>
-                      <a
-                        href={rawOriginalDownloadUrl}
-                        download={selectedFrame.sourceFilename || `raw_${selectedFrame.id}`}
-                        className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200 font-semibold"
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAuthenticatedDownload(
+                            rawOriginalDownloadUrl,
+                            selectedFrame.sourceFilename || `raw_${selectedFrame.id}`
+                          )
+                        }
+                        className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200 font-semibold cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5" />
                         <span>Download Raw</span>
-                      </a>
+                      </button>
                     </div>
                   </div>
                 )}
@@ -1419,7 +1468,7 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                             Processed frame image failed to load from object storage.
                           </div>
                         ) : (
-                          <img
+                          <AuthImage
                             src={processedImageUrl}
                             alt={`Processed 640x640 CLAHE frame ${selectedFrame.sourceFilename || selectedFrame.id}`}
                             onError={() =>
@@ -1449,14 +1498,19 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
                         {selectedFrame.qcPassed ? 'Letterbox 640×640 PNG' : 'QC Rejected'}
                       </span>
                       {selectedFrame.qcPassed && processedImageUrl ? (
-                        <a
-                          href={processedImageUrl}
-                          download={`processed_640x640_${selectedFrame.id}.png`}
-                          className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200 font-semibold"
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleAuthenticatedDownload(
+                              processedImageUrl,
+                              `processed_640x640_${selectedFrame.id}.png`
+                            )
+                          }
+                          className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200 font-semibold cursor-pointer"
                         >
                           <Download className="w-3.5 h-3.5" />
                           <span>Download PNG</span>
-                        </a>
+                        </button>
                       ) : (
                         <span className="text-slate-600 font-mono">Unavailable</span>
                       )}
@@ -2172,7 +2226,7 @@ export const ThermalIngestionView: React.FC<ThermalIngestionViewProps> = ({ vill
               </button>
             </div>
             <div className="flex-1 bg-black flex items-center justify-center p-4 overflow-auto">
-              <img
+              <AuthImage
                 src={previewLightbox.url}
                 alt={previewLightbox.title}
                 className="max-h-[75vh] max-w-full object-contain"

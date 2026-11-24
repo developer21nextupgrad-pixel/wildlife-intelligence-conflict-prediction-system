@@ -323,3 +323,306 @@ export interface RtspTestPullResult {
   rejectedCount: number;
   frames: ThermalFrameRecord[];
 }
+
+export type AnimalDetectionStatus =
+  | 'completed'
+  | 'no_animal_detected'
+  | 'needs_review'
+  | 'failed';
+
+export interface AnimalBoundingBox {
+  xmin: number;
+  ymin: number;
+  width: number;
+  height: number;
+  pixelXmin: number;
+  pixelYmin: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
+
+export interface AnimalClassificationCandidate {
+  speciesLabel: string;
+  commonName?: string | null;
+  scientificName?: string | null;
+  confidence: number;
+}
+
+export interface ReidCandidate {
+  animalIdentityId: string;
+  animalCode: string;
+  species: string;
+  similarityScore: number;
+  cropImageUrl?: string | null;
+}
+
+export interface CropQualitySummary {
+  passed: boolean;
+  reason?: string | null;
+  width: number;
+  height: number;
+  blurScore: number;
+}
+
+export interface AnimalDetectionItem {
+  index: number;
+  category: 'animal' | 'human' | 'vehicle';
+  detectorConfidence: number;
+  bbox: AnimalBoundingBox;
+  speciesLabel: string;
+  commonName?: string | null;
+  scientificName?: string | null;
+  taxonomicLevel?: string | null;
+  taxonomyRaw?: string | null;
+  speciesConfidence: number;
+  predictionSource?: string | null;
+  needsReview: boolean;
+  topCandidates: AnimalClassificationCandidate[];
+  individualReIdStatus: string;
+  reidMatchId?: string | null;
+  embeddingId?: string | null;
+  animalIdentityId?: string | null;
+  animalCode?: string | null;
+  reidDecision?: string | null;
+  reidReviewStatus?: string | null;
+  reidSimilarityScore?: number | null;
+  reidReviewReason?: string | null;
+  reidTopCandidates?: ReidCandidate[];
+  cropObjectKey?: string | null;
+  cropImageUrl?: string | null;
+  cropQuality?: CropQualitySummary | null;
+}
+
+export interface AnimalDetectionModelMetadata {
+  detectorModel: string;
+  classifierModel: string;
+  speciesnetVersion: string;
+  geofenceEnabled: boolean;
+  countryCode?: string | null;
+  admin1Region?: string | null;
+  minDetectionConfidence: number;
+  minSpeciesConfidence: number;
+  thermalImagerySupported: boolean;
+  imageryNotice: string;
+  reidEnabled?: boolean;
+  reidModel?: string | null;
+  reidLicense?: string | null;
+  reidMatchThreshold?: number | null;
+  reidAmbiguousThreshold?: number | null;
+}
+
+export interface LinkedAlertSummary {
+  id: string;
+  title: string;
+  severity: string;
+  affectedVillage: string;
+  assignedOfficer?: string | null;
+  responseStatus: string;
+  riskReason?: string | null;
+}
+
+export interface AnimalDetectionRecord {
+  id: string;
+  sourceFilename: string;
+  contentType: string;
+  fileSizeBytes: number;
+  width: number;
+  height: number;
+  imageObjectKey: string;
+  imageUrl: string;
+  storageBackend: string;
+  processingStatus: AnimalDetectionStatus;
+  detectionCount: number;
+  animalCount: number;
+  primarySpecies?: string | null;
+  primaryCommonName?: string | null;
+  primaryScientificName?: string | null;
+  primaryConfidence?: number | null;
+  countryCode?: string | null;
+  admin1Region?: string | null;
+  cameraId?: string | null;
+  villageId?: string | null;
+  capturedAt?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  locationName?: string | null;
+  idempotencyKey?: string | null;
+  generatedSightingId?: string | null;
+  sightingIntegrationStatus?: string | null;
+  generatedAlertIds?: string[];
+  generatedAlerts?: LinkedAlertSummary[];
+  detectorModel: string;
+  classifierModel: string;
+  inferenceDurationMs: number;
+  detections: AnimalDetectionItem[];
+  modelMetadata: AnimalDetectionModelMetadata;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnimalIdentitySummary {
+  id: string;
+  animalCode: string;
+  species: string;
+  scientificName?: string | null;
+  speciesPrefix: string;
+  status: string;
+  verificationStatus: string;
+  primaryCropUrl?: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  totalSightings: number;
+  referenceImageCount: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnimalEmbeddingImage {
+  id: string;
+  detectionId: string;
+  detectionItemIndex: number;
+  animalIdentityId?: string | null;
+  cropImageUrl: string;
+  sourceImageUrl: string;
+  species: string;
+  modelName: string;
+  modelVersion: string;
+  embeddingDim: number;
+  cropWidth: number;
+  cropHeight: number;
+  blurScore: number;
+  qualityPassed: boolean;
+  isReference: boolean;
+  createdAt: string;
+}
+
+export interface IdentityReviewLog {
+  id: string;
+  matchId: string;
+  animalIdentityId?: string | null;
+  previousAnimalId?: string | null;
+  action: string;
+  reviewedBy: string;
+  reviewedAt: string;
+  reason?: string | null;
+}
+
+export interface ReidMatchRecord {
+  id: string;
+  detectionId: string;
+  embeddingId: string;
+  detectionItemIndex: number;
+  species: string;
+  matchedAnimalId?: string | null;
+  matchedAnimalCode?: string | null;
+  suggestedAnimalId?: string | null;
+  suggestedAnimalCode?: string | null;
+  similarityScore?: number | null;
+  decision: string;
+  reviewStatus: string;
+  reviewReason?: string | null;
+  topCandidates: ReidCandidate[];
+  cropImageUrl: string;
+  sourceImageUrl: string;
+  modelVersion: string;
+  thresholdsSnapshot: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnimalIdentityDetail extends AnimalIdentitySummary {
+  images: AnimalEmbeddingImage[];
+  matches: ReidMatchRecord[];
+  reviewLogs: IdentityReviewLog[];
+}
+
+export interface AlertRuleRecord {
+  id: string;
+  name: string;
+  speciesFilter?: string | null;
+  riskLevel: IncidentSeverity;
+  villageId?: string | null;
+  zoneName?: string | null;
+  minRepeatCount: number;
+  timeWindowMinutes: number;
+  minSpeciesConfidence: number;
+  enabled: boolean;
+  autoNotifyOfficer: boolean;
+  autoDispatchIotBoundary: boolean;
+  description?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AlertRuleCreateInput {
+  name: string;
+  speciesFilter?: string;
+  riskLevel: IncidentSeverity;
+  villageId?: string;
+  zoneName?: string;
+  minRepeatCount: number;
+  timeWindowMinutes: number;
+  minSpeciesConfidence: number;
+  enabled: boolean;
+  autoNotifyOfficer: boolean;
+  autoDispatchIotBoundary: boolean;
+  description?: string;
+}
+
+export interface ForestOfficerRecord {
+  id: string;
+  name: string;
+  badgeNumber: string;
+  role: string;
+  forestRange: string;
+  district: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  whatsappOptIn: boolean;
+  smsOptIn: boolean;
+  contactChannel: string;
+  dutyStatus: string;
+  onDuty: boolean;
+  notificationEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AlertDeliveryAttemptRecord {
+  id: string;
+  alertId: string;
+  officerId?: string | null;
+  officerName: string;
+  channel: string;
+  routingBasis: string;
+  distanceKm?: number | null;
+  status: string;
+  attemptNumber: number;
+  detail?: string | null;
+  attemptedAt: string;
+}
+
+export interface IotEventRecord {
+  id: string;
+  alertId?: string | null;
+  cameraId?: string | null;
+  deviceCode: string;
+  animalIdentityId?: string | null;
+  species: string;
+  confidence: number;
+  riskLevel: string;
+  eventType: string;
+  isDevTest: boolean;
+  payloadJson: Record<string, unknown>;
+  deliveryStatus: string;
+  retryCount: number;
+  acknowledgedAt?: string | null;
+  acknowledgedBy?: string | null;
+  ackNote?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+

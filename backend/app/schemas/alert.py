@@ -71,6 +71,12 @@ class AlertResponse(BaseModel):
     acknowledged_at: datetime | None = None
     assigned_officer: str | None = None
     response_status: str
+    sighting_id: UUID | None = None
+    animal_identity_id: UUID | None = None
+    animal_detection_id: UUID | None = None
+    alert_rule_id: UUID | None = None
+    image_url: str | None = None
+    risk_reason: str | None = None
     is_demo: bool
     created_at: datetime
     updated_at: datetime

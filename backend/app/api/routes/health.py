@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.database import check_database_health, get_db
+from app.core.security import require_roles
 from app.models import (
     Alert,
     Camera,
@@ -35,7 +36,11 @@ def health_check(settings: Settings = Depends(get_settings)) -> HealthResponse:
     )
 
 
-@router.get("/database", response_model=DatabaseHealthResponse)
+@router.get(
+    "/database",
+    response_model=DatabaseHealthResponse,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def database_health_check(db: Session = Depends(get_db)) -> DatabaseHealthResponse:
     try:
         db_info = check_database_health(db)
@@ -69,7 +74,7 @@ def database_health_check(db: Session = Depends(get_db)) -> DatabaseHealthRespon
         ) from exc
 
 
-@router.get("/storage")
+@router.get("/storage", dependencies=[Depends(require_roles("admin"))])
 def storage_health_check(
     storage: ObjectStorageBackend = Depends(get_storage_backend),
 ) -> dict:
@@ -77,6 +82,10 @@ def storage_health_check(
     if not info.get("reachable"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=info,
+            detail={
+                "backend": info.get("backend"),
+                "reachable": False,
+                "error": "Object storage backend is currently unreachable.",
+            },
         )
     return {"status": "ok", **info}

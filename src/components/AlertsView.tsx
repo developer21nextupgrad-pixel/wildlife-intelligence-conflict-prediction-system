@@ -110,7 +110,7 @@ interface AlertsViewProps {
   alerts: AlertNotification[];
   onCreateAlert: (data: AlertUpsertInput) => Promise<void>;
   onUpdateAlert: (id: string, data: Partial<AlertUpsertInput>) => Promise<void>;
-  onDeleteAlert: (id: string) => Promise<void>;
+  onDeleteAlert?: (id: string) => Promise<void>;
   onAcknowledge: (id: string, officerName: string) => Promise<void>;
   onUpdateResponseStatus: (
     id: string,
@@ -268,7 +268,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   };
 
   const handleConfirmDelete = async () => {
-    if (!alertPendingDelete || isDeletingAlert) return;
+    if (!alertPendingDelete || !onDeleteAlert || isDeletingAlert) return;
     setIsDeletingAlert(true);
     setDeleteError(null);
     const targetTitle = alertPendingDelete.title;
@@ -608,18 +608,20 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                       <span>Edit</span>
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setAlertPendingDelete(alert);
-                      }}
-                      aria-label={`Delete alert ${alert.title}`}
-                      className="flex items-center gap-1 bg-slate-950 hover:bg-red-950/70 text-red-300 border border-red-900/60 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Delete</span>
-                    </button>
+                    {onDeleteAlert && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setAlertPendingDelete(alert);
+                        }}
+                        aria-label={`Delete alert ${alert.title}`}
+                        className="flex items-center gap-1 bg-slate-950 hover:bg-red-950/70 text-red-300 border border-red-900/60 font-semibold text-xs px-2.5 py-1.5 rounded-lg transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

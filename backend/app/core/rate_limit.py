@@ -9,7 +9,12 @@ from starlette.responses import Response
 
 
 class SlidingWindowRateLimiter:
-    """Thread-safe in-memory sliding-window rate limiter keyed by client IP."""
+    """Thread-safe in-memory sliding-window rate limiter keyed by client IP / bucket.
+
+    Note: In-memory sliding windows operate per worker process. Run Render web service with
+    1 Uvicorn worker (default for single-instance Standard/Starter) or set RATE_LIMIT_REDIS_URL
+    if scaling across multiple processes/replicas.
+    """
 
     def __init__(self, max_requests: int, window_seconds: int) -> None:
         self.max_requests = max_requests
@@ -17,21 +22,37 @@ class SlidingWindowRateLimiter:
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
         self._lock = Lock()
 
-    def check(self, key: str) -> tuple[bool, int, int]:
+    def check(
+        self,
+        key: str,
+        *,
+        max_requests: int | None = None,
+        window_seconds: int | None = None,
+    ) -> tuple[bool, int, int]:
+        limit = max_requests or self.max_requests
+        window = window_seconds or self.window_seconds
         now = time.monotonic()
-        cutoff = now - self.window_seconds
+        cutoff = now - window
 
         with self._lock:
+            if len(self._buckets) > 10_000 and key not in self._buckets:
+                # Prune stale buckets to bound memory under high-cardinality IP scans
+                stale_keys = [
+                    k for k, dq in self._buckets.items() if not dq or dq[-1] <= cutoff
+                ]
+                for stale in stale_keys:
+                    del self._buckets[stale]
+
             bucket = self._buckets[key]
             while bucket and bucket[0] <= cutoff:
                 bucket.popleft()
 
-            if len(bucket) >= self.max_requests:
-                retry_after = max(1, int(self.window_seconds - (now - bucket[0])) + 1)
+            if len(bucket) >= limit:
+                retry_after = max(1, int(window - (now - bucket[0])) + 1)
                 return False, 0, retry_after
 
             bucket.append(now)
-            remaining = max(0, self.max_requests - len(bucket))
+            remaining = max(0, limit - len(bucket))
             return True, remaining, 0
 
     def reset(self) -> None:
@@ -40,10 +61,17 @@ class SlidingWindowRateLimiter:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, limiter: SlidingWindowRateLimiter, exempt_paths: set[str] | None = None):
+    def __init__(
+        self,
+        app,
+        limiter: SlidingWindowRateLimiter,
+        exempt_paths: set[str] | None = None,
+        strict_route_limits: dict[str, tuple[int, int]] | None = None,
+    ):
         super().__init__(app)
         self.limiter = limiter
         self.exempt_paths = exempt_paths or set()
+        self.strict_route_limits = strict_route_limits or {}
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -58,22 +86,32 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             else (request.client.host if request.client else "unknown")
         )
 
-        allowed, remaining, retry_after = self.limiter.check(client_ip)
+        strict = self.strict_route_limits.get(request.url.path)
+        if strict is not None:
+            limit_val, window_val = strict
+            bucket_key = f"strict:{request.url.path}:{client_ip}"
+        else:
+            limit_val, window_val = self.limiter.max_requests, self.limiter.window_seconds
+            bucket_key = client_ip
+
+        allowed, remaining, retry_after = self.limiter.check(
+            bucket_key, max_requests=limit_val, window_seconds=window_val
+        )
         if not allowed:
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
                     "error": "rate_limit_exceeded",
-                    "detail": f"Rate limit exceeded ({self.limiter.max_requests} requests per {self.limiter.window_seconds}s).",
+                    "detail": f"Rate limit exceeded ({limit_val} requests per {window_val}s).",
                 },
                 headers={
                     "Retry-After": str(retry_after),
-                    "X-RateLimit-Limit": str(self.limiter.max_requests),
+                    "X-RateLimit-Limit": str(limit_val),
                     "X-RateLimit-Remaining": "0",
                 },
             )
 
         response = await call_next(request)
-        response.headers["X-RateLimit-Limit"] = str(self.limiter.max_requests)
+        response.headers["X-RateLimit-Limit"] = str(limit_val)
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         return response

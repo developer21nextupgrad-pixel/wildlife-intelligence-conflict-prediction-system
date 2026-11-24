@@ -13,7 +13,8 @@ import {
   TreePine,
   ChevronLeft,
   ChevronRight,
-  Thermometer
+  Thermometer,
+  ScanSearch
 } from 'lucide-react';
 
 export interface NavItem {
@@ -119,6 +120,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       tooltipText: 'Analytics & Intelligence Reports',
     },
     {
+      id: 'animal-detection',
+      name: 'Animal Detection',
+      icon: ScanSearch,
+      badge: 'Phase 1-3',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border border-emerald-800/60 font-mono',
+      tooltipText: 'Animal Detection, Re-Identification & Intelligence Integration',
+    },
+    {
       id: 'thermal-ingestion',
       name: 'Thermal Ingestion',
       icon: Thermometer,
@@ -145,6 +154,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     if (tab === 'alerts') return 'alert-management';
     if (tab === 'patrols') return 'patrol-operations';
     if (tab === 'analytics') return 'analytics-reports';
+    if (tab === 'detection' || tab === 'detections' || tab === 'species-id') {
+      return 'animal-detection';
+    }
     if (tab === 'thermal' || tab === 'ingestion') return 'thermal-ingestion';
     if (tab === 'settings' || tab === 'users') return 'administration';
     return tab;

@@ -1207,22 +1207,45 @@ function alertToGeoJSON(a: AlertRecord) {
 // --- Express App & API Router ---
 const app = express();
 
-// CORS headers (mounted before proxy and JSON parser so OPTIONS and X-Camera-Key pass cleanly)
+// CORS headers (strictly restricted to configured origins; local origins allowed only outside production)
+function getAllowedCorsOrigins(): Set<string> {
+  const raw = process.env.CORS_ORIGINS || '';
+  const origins = new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  if (process.env.NODE_ENV !== 'production') {
+    origins.add(`http://localhost:${PORT}`);
+    origins.add(`http://127.0.0.1:${PORT}`);
+    origins.add('http://localhost:5173');
+    origins.add('http://127.0.0.1:5173');
+  }
+  return origins;
+}
+
+const allowedCorsOrigins = getAllowedCorsOrigins();
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  if (origin && allowedCorsOrigins.has(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Camera-Key');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Camera-Key, Idempotency-Key');
   if (req.method === 'OPTIONS') {
+    if (origin && !allowedCorsOrigins.has(origin)) {
+      return res.sendStatus(403);
+    }
     return res.sendStatus(204);
   }
   next();
 });
 
-// Raw streaming proxy to FastAPI sidecar for Phase 1 Thermal Cameras & Ingestion.
-// In production, Vercel/Node should call the standalone Render FastAPI service directly via VITE_API_BASE_URL
-// (unless FASTAPI_SIDECAR_URL is explicitly configured).
-// Mounted BEFORE express.json() so multipart/form-data (images/video) and raw payloads stream untouched.
-app.use([`${API_PREFIX}/cameras`, `${API_PREFIX}/ingest`], (req: Request, res: Response) => {
+function forwardToFastApiSidecar(req: Request, res: Response) {
   if (
     process.env.NODE_ENV === 'production' &&
     !process.env.FASTAPI_SIDECAR_URL &&
@@ -1230,7 +1253,7 @@ app.use([`${API_PREFIX}/cameras`, `${API_PREFIX}/ingest`], (req: Request, res: R
   ) {
     return res.status(503).json({
       detail:
-        'Production thermal ingestion requires the standalone Render FastAPI backend (set VITE_API_BASE_URL on Vercel or FASTAPI_SIDECAR_URL). Local SQLite/filesystem sidecar is disabled in production.',
+        'Production backend requires the standalone Render FastAPI backend (set VITE_API_BASE_URL on Vercel or FASTAPI_SIDECAR_URL). Local SQLite/filesystem sidecar is disabled in production.',
     });
   }
 
@@ -1274,7 +1297,7 @@ app.use([`${API_PREFIX}/cameras`, `${API_PREFIX}/ingest`], (req: Request, res: R
   proxyReq.on('error', (err) => {
     if (!res.headersSent) {
       res.status(503).json({
-        detail: `FastAPI Thermal Ingestion service unavailable at ${FASTAPI_SIDECAR_URL}: ${err.message}`,
+        detail: `FastAPI Intelligence service unavailable at ${FASTAPI_SIDECAR_URL}: ${err.message}`,
       });
     } else {
       res.end();
@@ -1282,7 +1305,41 @@ app.use([`${API_PREFIX}/cameras`, `${API_PREFIX}/ingest`], (req: Request, res: R
   });
 
   req.pipe(proxyReq, { end: true });
-});
+}
+
+// Raw streaming proxy to FastAPI sidecar for Thermal Cameras, Ingestion, Animal Detection, Re-ID Intelligence & IoT.
+// Mounted BEFORE express.json() so multipart/form-data (images/video) and raw payloads stream untouched.
+app.use(
+  [
+    `${API_PREFIX}/auth`,
+    `${API_PREFIX}/cameras`,
+    `${API_PREFIX}/ingest`,
+    `${API_PREFIX}/detections`,
+    `${API_PREFIX}/animal-intelligence`,
+    `${API_PREFIX}/iot`,
+  ],
+  (req: Request, res: Response) => forwardToFastApiSidecar(req, res)
+);
+
+// When FastAPI sidecar is running locally (or FASTAPI_SIDECAR_URL is configured), also route core
+// geospatial/operational REST endpoints to FastAPI so Sightings, Alerts, Villages, and Incidents share the exact same DB.
+app.use(
+  [
+    `${API_PREFIX}/incidents`,
+    `${API_PREFIX}/sightings`,
+    `${API_PREFIX}/alerts`,
+    `${API_PREFIX}/patrols`,
+    `${API_PREFIX}/villages`,
+    `${API_PREFIX}/gis`,
+    `${API_PREFIX}/health`,
+  ],
+  (req: Request, res: Response, next) => {
+    if (fastApiProcess !== null || Boolean(process.env.FASTAPI_SIDECAR_URL)) {
+      return forwardToFastApiSidecar(req, res);
+    }
+    return next();
+  }
+);
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -2430,6 +2487,9 @@ async function startFastApiSidecar(): Promise<void> {
     ...process.env,
     PYTHONUNBUFFERED: '1',
   };
+  if (!childEnv.AUTH_JWT_SECRET) {
+    childEnv.AUTH_JWT_SECRET = crypto.randomBytes(32).toString('hex');
+  }
 
   if (process.env.FASTAPI_SIDECAR_DATABASE_URL) {
     childEnv.DATABASE_URL = process.env.FASTAPI_SIDECAR_DATABASE_URL;
@@ -2449,6 +2509,13 @@ async function startFastApiSidecar(): Promise<void> {
   }
   if (!childEnv.LOCAL_STORAGE_DIR) {
     childEnv.LOCAL_STORAGE_DIR = './storage_dev';
+  }
+  if (
+    process.env.FASTAPI_SIDECAR_AUTO_SEED !== 'false' &&
+    (!childEnv.AUTO_SEED_DEMO_DATA ||
+      childEnv.DATABASE_URL === 'sqlite:///./wicps_dev_phase1.db')
+  ) {
+    childEnv.AUTO_SEED_DEMO_DATA = 'true';
   }
 
   if (fs.existsSync(alembicBin)) {
@@ -2494,6 +2561,15 @@ async function startFastApiSidecar(): Promise<void> {
     stopSidecar();
     process.exit(0);
   });
+
+  // Wait briefly for the FastAPI socket to accept connections before Vite/client traffic arrives
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (fastApiProcess === null) break;
+    if (await isTcpPortOpen(FASTAPI_SIDECAR_HOST, FASTAPI_SIDECAR_PORT, 300)) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
 }
 
 async function startServer() {

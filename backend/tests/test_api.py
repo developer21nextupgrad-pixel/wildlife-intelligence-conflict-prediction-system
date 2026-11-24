@@ -379,9 +379,9 @@ def test_demo_flag_distinguishes_seed_from_operational(seeded_client: TestClient
 
 
 def test_rate_limiting_middleware(db_session):
-    settings = Settings(
-        environment="test",
-        auto_seed_demo_data=False,
+    from conftest import auth_headers, make_test_settings
+
+    settings = make_test_settings(
         rate_limit_requests=3,
         rate_limit_window_seconds=60,
     )
@@ -389,6 +389,7 @@ def test_rate_limiting_middleware(db_session):
     app.dependency_overrides[get_db] = lambda: db_session
 
     with TestClient(app) as limited_client:
+        limited_client.headers.update(auth_headers(settings, role="operator"))
         for _ in range(3):
             assert limited_client.get("/api/v1/incidents").status_code == 200
         blocked = limited_client.get("/api/v1/incidents")
@@ -396,34 +397,43 @@ def test_rate_limiting_middleware(db_session):
         assert blocked.json()["error"] == "rate_limit_exceeded"
 
 
-def test_cors_and_private_network_access_preflight(client: TestClient):
-    ai_studio_origin = "https://ais-dev-n6jtdm2fq5bfuarlmbgcjx-731993532283.asia-northeast1.run.app"
-    preflight = client.options(
-        "/api/v1/health",
-        headers={
-            "Origin": ai_studio_origin,
-            "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Private-Network": "true",
-        },
-    )
-    assert preflight.status_code == 200
-    assert preflight.headers.get("access-control-allow-origin") == ai_studio_origin
-    assert preflight.headers.get("access-control-allow-private-network") == "true"
+def test_cors_and_private_network_access_preflight(db_session):
+    from conftest import make_test_settings
 
-    local_get = client.get("/api/v1/health", headers={"Origin": "http://localhost:3000"})
-    assert local_get.status_code == 200
-    assert local_get.headers.get("access-control-allow-origin") == "http://localhost:3000"
-
-    disallowed = client.options(
-        "/api/v1/health",
-        headers={
-            "Origin": "https://untrusted-origin.example.com",
-            "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Private-Network": "true",
-        },
+    approved_preview_origin = "https://ais-dev-n6jtdm2fq5bfuarlmbgcjx-731993532283.asia-northeast1.run.app"
+    settings = make_test_settings(
+        cors_origins=f"http://localhost:3000,{approved_preview_origin}"
     )
-    assert disallowed.status_code == 400
-    assert disallowed.headers.get("access-control-allow-origin") is None
+    app = create_application(settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    with TestClient(app) as cors_client:
+        preflight = cors_client.options(
+            "/api/v1/health",
+            headers={
+                "Origin": approved_preview_origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers.get("access-control-allow-origin") == approved_preview_origin
+        assert preflight.headers.get("access-control-allow-private-network") == "true"
+
+        local_get = cors_client.get("/api/v1/health", headers={"Origin": "http://localhost:3000"})
+        assert local_get.status_code == 200
+        assert local_get.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+        disallowed = cors_client.options(
+            "/api/v1/health",
+            headers={
+                "Origin": "https://untrusted-origin.example.com",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        assert disallowed.status_code == 400
+        assert disallowed.headers.get("access-control-allow-origin") is None
+    app.dependency_overrides.clear()
 
 
 def test_village_id_resolution_on_create_and_update(seeded_client: TestClient):

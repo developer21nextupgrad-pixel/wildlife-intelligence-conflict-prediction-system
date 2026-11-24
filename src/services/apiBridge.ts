@@ -1,21 +1,30 @@
 import {
-  Incident,
-  AnimalSighting,
-  VillageRiskProfile,
+  AlertDeliveryAttemptRecord,
   AlertNotification,
-  RiskZone,
-  TelemetryCollar,
-  UserStaff,
-  PredictionResult,
-  SpeciesType,
+  AlertRuleCreateInput,
+  AlertRuleRecord,
+  AnimalDetectionRecord,
+  AnimalIdentityDetail,
+  AnimalIdentitySummary,
+  AnimalSighting,
+  DevSampleIngestResult,
+  ForestOfficerRecord,
+  Incident,
+  IotEventRecord,
   PatrolOperation,
+  ReidMatchRecord,
+  RiskZone,
+  RtspTestPullInput,
+  RtspTestPullResult,
+  SpeciesType,
+  TelemetryCollar,
   ThermalCamera,
   ThermalCameraCreateInput,
   ThermalCameraCreateResult,
   ThermalFrameRecord,
-  DevSampleIngestResult,
-  RtspTestPullInput,
-  RtspTestPullResult,
+  UserStaff,
+  VillageRiskProfile,
+  PredictionResult,
 } from '../types';
 import {
   INITIAL_TELEMETRY,
@@ -24,13 +33,21 @@ import {
 import { generateDemoPrediction, DemoPredictionOptions } from '../utils/conflictCalculations';
 import {
   AlertUpsertInput,
+  ApiAlertDeliveryAttemptDto,
   ApiAlertDto,
+  ApiAlertRuleDto,
+  ApiAnimalDetectionDto,
+  ApiAnimalIdentityDetailDto,
+  ApiAnimalIdentitySummaryDto,
   ApiCameraCreateDto,
   ApiCameraDto,
   ApiDevSampleIngestDto,
+  ApiForestOfficerDto,
   ApiGeoJsonFeatureCollectionDto,
   ApiIncidentDto,
+  ApiIotEventDto,
   ApiPatrolDto,
+  ApiReidMatchDto,
   ApiRiskZoneFeatureDto,
   ApiRtspTestPullDto,
   ApiSightingDto,
@@ -39,19 +56,28 @@ import {
   buildThermalFrameFilterQuery,
   extractApiErrorMessage,
   IncidentUpsertInput,
+  mapAlertDeliveryAttemptFromApi,
   mapAlertFromApi,
+  mapAlertRuleFromApi,
+  mapAlertRuleToCreatePayload,
   mapAlertToCreatePayload,
   mapAlertToUpdatePayload,
+  mapAnimalDetectionFromApi,
+  mapAnimalIdentityDetailFromApi,
+  mapAnimalIdentitySummaryFromApi,
   mapCameraCreateFromApi,
   mapCameraFromApi,
   mapCameraToCreatePayload,
   mapDevSampleIngestFromApi,
+  mapForestOfficerFromApi,
   mapIncidentFromApi,
   mapIncidentToCreatePayload,
   mapIncidentToUpdatePayload,
+  mapIotEventFromApi,
   mapPatrolFromApi,
   mapPatrolToCreatePayload,
   mapPatrolToUpdatePayload,
+  mapReidMatchFromApi,
   mapRiskZoneFromGeoJson,
   mapRtspTestPullFromApi,
   mapSightingFromApi,
@@ -75,6 +101,17 @@ import {
   SETTINGS_STORAGE_KEY,
   writeSavedApiBaseUrl,
 } from '../utils/apiConfig';
+import {
+  AuthenticatedUserProfile,
+  AuthStatusSummary,
+  clearStoredAuthSession,
+  emitAuthUnauthorized,
+  getStoredAuthToken,
+  normalizeWicpsRole,
+  setStoredAuthSession,
+  UserAccountRecord,
+  WicpsRole,
+} from '../utils/authStorage';
 
 const STORAGE_KEYS = {
   LEGACY_VILLAGES: 'wicps_villages_v1',
@@ -202,6 +239,7 @@ async function apiRequest<T>(
   }
 
   const url = `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
 
   let response: Response;
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
@@ -211,6 +249,11 @@ async function apiRequest<T>(
         'Content-Type': 'application/json',
         ...((options.headers as Record<string, string>) || {}),
       };
+  const token = getStoredAuthToken();
+  const hasCameraKey = Boolean(headers['X-Camera-Key'] || headers['x-camera-key']);
+  if (token && !headers.Authorization && !headers.authorization && !hasCameraKey) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   try {
     response = await fetch(url, {
       ...options,
@@ -242,6 +285,15 @@ async function apiRequest<T>(
   }
 
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      !hasCameraKey &&
+      !normalizedPath.startsWith('/auth/login') &&
+      !normalizedPath.startsWith('/auth/bootstrap-admin') &&
+      !normalizedPath.startsWith('/auth/status')
+    ) {
+      emitAuthUnauthorized();
+    }
     const message = extractApiErrorMessage(
       response.status,
       parsedBody,
@@ -259,6 +311,71 @@ async function apiRequest<T>(
   return parsedBody as T;
 }
 
+interface ApiAuthStatusDto {
+  auth_enabled: boolean;
+  password_login_enabled: boolean;
+  oidc_enabled: boolean;
+  oidc_issuer: string | null;
+  needs_initial_setup: boolean;
+}
+
+interface ApiAuthenticatedProfileDto {
+  id: string | null;
+  subject: string;
+  email: string | null;
+  display_name: string;
+  role: string;
+  roles: string[];
+  effective_roles: string[];
+  auth_method: string;
+}
+
+interface ApiLoginResponseDto {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: ApiAuthenticatedProfileDto;
+}
+
+interface ApiUserAccountDto {
+  id: string;
+  email: string;
+  username: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapUserProfileFromApi(dto: ApiAuthenticatedProfileDto): AuthenticatedUserProfile {
+  return {
+    id: dto.id ?? null,
+    subject: dto.subject,
+    email: dto.email ?? null,
+    displayName: dto.display_name,
+    role: normalizeWicpsRole(dto.role),
+    roles: dto.roles ?? [],
+    effectiveRoles: dto.effective_roles ?? [],
+    authMethod: dto.auth_method,
+  };
+}
+
+function mapUserAccountFromApi(dto: ApiUserAccountDto): UserAccountRecord {
+  return {
+    id: dto.id,
+    email: dto.email,
+    username: dto.username,
+    displayName: dto.display_name,
+    role: normalizeWicpsRole(dto.role),
+    isActive: dto.is_active,
+    lastLoginAt: dto.last_login_at ?? null,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
 export const apiBridge = {
   getApiBaseUrl(): string {
     return getConfiguredApiBaseUrl();
@@ -266,6 +383,122 @@ export const apiBridge = {
 
   getEnvDefaultApiBaseUrl(): string {
     return getEnvApiBaseUrl();
+  },
+
+  // --- Authentication & RBAC ---
+  async getAuthStatus(baseUrlOverride?: string): Promise<AuthStatusSummary> {
+    const dto = await apiRequest<ApiAuthStatusDto>('/auth/status', { method: 'GET' }, baseUrlOverride);
+    return {
+      authEnabled: dto.auth_enabled,
+      passwordLoginEnabled: dto.password_login_enabled,
+      oidcEnabled: dto.oidc_enabled,
+      oidcIssuer: dto.oidc_issuer ?? null,
+      needsInitialSetup: dto.needs_initial_setup,
+    };
+  },
+
+  async bootstrapInitialAdmin(input: {
+    email: string;
+    displayName: string;
+    password: string;
+  }): Promise<AuthenticatedUserProfile> {
+    const res = await apiRequest<ApiLoginResponseDto>('/auth/bootstrap-admin', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: input.email.trim(),
+        display_name: input.displayName.trim(),
+        password: input.password,
+      }),
+    });
+    const profile = mapUserProfileFromApi(res.user);
+    setStoredAuthSession(res.access_token, profile);
+    return profile;
+  },
+
+  async login(identifier: string, password: string): Promise<AuthenticatedUserProfile> {
+    const res = await apiRequest<ApiLoginResponseDto>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        identifier: identifier.trim(),
+        password,
+      }),
+    });
+    const profile = mapUserProfileFromApi(res.user);
+    setStoredAuthSession(res.access_token, profile);
+    return profile;
+  },
+
+  async getCurrentUser(): Promise<AuthenticatedUserProfile> {
+    const dto = await apiRequest<ApiAuthenticatedProfileDto>('/auth/me', { method: 'GET' });
+    const profile = mapUserProfileFromApi(dto);
+    const token = getStoredAuthToken();
+    if (token) {
+      setStoredAuthSession(token, profile);
+    }
+    return profile;
+  },
+
+  async authenticateWithToken(rawToken: string): Promise<AuthenticatedUserProfile> {
+    const clean = rawToken.trim();
+    const dto = await apiRequest<ApiAuthenticatedProfileDto>('/auth/me', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${clean}`,
+      },
+    });
+    const profile = mapUserProfileFromApi(dto);
+    setStoredAuthSession(clean, profile);
+    return profile;
+  },
+
+  logout(): void {
+    clearStoredAuthSession();
+  },
+
+  async listUsers(): Promise<UserAccountRecord[]> {
+    const rows = await apiRequest<ApiUserAccountDto[]>('/auth/users', { method: 'GET' });
+    return rows.map(mapUserAccountFromApi);
+  },
+
+  async createUser(input: {
+    email: string;
+    username?: string;
+    displayName: string;
+    role: WicpsRole;
+    password: string;
+  }): Promise<UserAccountRecord> {
+    const dto = await apiRequest<ApiUserAccountDto>('/auth/users', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: input.email.trim(),
+        username: input.username?.trim() || null,
+        display_name: input.displayName.trim(),
+        role: input.role,
+        password: input.password,
+      }),
+    });
+    return mapUserAccountFromApi(dto);
+  },
+
+  async updateUser(
+    userId: string,
+    updates: {
+      displayName?: string;
+      role?: WicpsRole;
+      isActive?: boolean;
+      password?: string;
+    }
+  ): Promise<UserAccountRecord> {
+    const payload: Record<string, unknown> = {};
+    if (updates.displayName !== undefined) payload.display_name = updates.displayName.trim();
+    if (updates.role !== undefined) payload.role = updates.role;
+    if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+    if (updates.password !== undefined && updates.password) payload.password = updates.password;
+    const dto = await apiRequest<ApiUserAccountDto>(`/auth/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    return mapUserAccountFromApi(dto);
   },
 
   // --- Health & Database Verification ---
@@ -580,6 +813,10 @@ export const apiBridge = {
       const dto = await new Promise<ApiDevSampleIngestDto>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', url, true);
+        const token = getStoredAuthToken();
+        if (token) {
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        }
         xhr.upload.onprogress = (evt) => {
           if (evt.lengthComputable && evt.total > 0) {
             params.onProgress?.(Math.min(100, Math.round((evt.loaded / evt.total) * 100)));
@@ -595,6 +832,9 @@ export const apiBridge = {
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve(parsed as ApiDevSampleIngestDto);
           } else {
+            if (xhr.status === 401) {
+              emitAuthUnauthorized();
+            }
             const msg = extractApiErrorMessage(
               xhr.status,
               parsed,
@@ -647,6 +887,377 @@ export const apiBridge = {
       }),
     });
     return mapRtspTestPullFromApi(res);
+  },
+
+  // --- Phase 1 / Phase 2 / Phase 3: Animal Detection, SpeciesNet, Re-ID & Wildlife Intelligence ---
+  getAnimalDetectionImageUrl(detectionId: string): string {
+    const baseUrl = getConfiguredApiBaseUrl();
+    return `${baseUrl}/detections/${detectionId}/image`;
+  },
+
+  async getAnimalDetections(params: {
+    page?: number;
+    pageSize?: number;
+    processingStatus?: string;
+    search?: string;
+  } = {}): Promise<{
+    items: AnimalDetectionRecord[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  }> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const qs = new URLSearchParams();
+    qs.set('page', String(params.page ?? 1));
+    qs.set('page_size', String(params.pageSize ?? 25));
+    if (params.processingStatus && params.processingStatus !== 'All') {
+      qs.set('processing_status', params.processingStatus);
+    }
+    if (params.search && params.search.trim()) {
+      qs.set('search', params.search.trim());
+    }
+    const res = await apiRequest<PaginatedApiResponse<ApiAnimalDetectionDto>>(
+      `/detections?${qs.toString()}`
+    );
+    return {
+      items: res.items.map((dto) =>
+        mapAnimalDetectionFromApi(dto, this.getAnimalDetectionImageUrl(dto.id), baseUrl)
+      ),
+      total: res.total,
+      page: res.page,
+      pageSize: res.page_size,
+      totalPages: res.total_pages,
+    };
+  },
+
+  async getAnimalDetectionById(detectionId: string): Promise<AnimalDetectionRecord> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const dto = await apiRequest<ApiAnimalDetectionDto>(`/detections/${detectionId}`);
+    return mapAnimalDetectionFromApi(dto, this.getAnimalDetectionImageUrl(dto.id), baseUrl);
+  },
+
+  async uploadAnimalDetectionImage(params: {
+    file: File;
+    countryCode?: string;
+    admin1Region?: string;
+    cameraId?: string;
+    villageId?: string;
+    latitude?: number;
+    longitude?: number;
+    locationName?: string;
+    capturedAt?: string;
+    autoCreateSighting?: boolean;
+    idempotencyKey?: string;
+    onProgress?: (percent: number) => void;
+  }): Promise<AnimalDetectionRecord> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const formData = new FormData();
+    formData.append('file', params.file);
+    if (params.countryCode && params.countryCode.trim()) {
+      formData.append('country_code', params.countryCode.trim().toUpperCase());
+    }
+    if (params.admin1Region && params.admin1Region.trim()) {
+      formData.append('admin1_region', params.admin1Region.trim().toUpperCase());
+    }
+    if (params.cameraId && params.cameraId.trim()) {
+      formData.append('camera_id', params.cameraId.trim());
+    }
+    if (params.villageId && params.villageId.trim()) {
+      formData.append('village_id', params.villageId.trim());
+    }
+    if (params.latitude !== undefined && params.longitude !== undefined) {
+      formData.append('latitude', String(params.latitude));
+      formData.append('longitude', String(params.longitude));
+    }
+    if (params.locationName && params.locationName.trim()) {
+      formData.append('location_name', params.locationName.trim());
+    }
+    if (params.capturedAt && params.capturedAt.trim()) {
+      formData.append('captured_at', params.capturedAt.trim());
+    }
+    if (params.autoCreateSighting !== undefined) {
+      formData.append('auto_create_sighting', String(params.autoCreateSighting));
+    }
+    if (params.idempotencyKey && params.idempotencyKey.trim()) {
+      formData.append('idempotency_key', params.idempotencyKey.trim());
+    }
+
+    let dto: ApiAnimalDetectionDto;
+    if (params.onProgress && typeof XMLHttpRequest !== 'undefined') {
+      const url = `${baseUrl}/detections/upload`;
+      dto = await new Promise<ApiAnimalDetectionDto>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        const token = getStoredAuthToken();
+        if (token) {
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        }
+        if (params.idempotencyKey && params.idempotencyKey.trim()) {
+          xhr.setRequestHeader('Idempotency-Key', params.idempotencyKey.trim());
+        }
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable && evt.total > 0) {
+            params.onProgress?.(Math.min(100, Math.round((evt.loaded / evt.total) * 100)));
+          }
+        };
+        xhr.onload = () => {
+          let parsed: unknown = null;
+          try {
+            parsed = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+          } catch {
+            parsed = null;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(parsed as ApiAnimalDetectionDto);
+          } else {
+            if (xhr.status === 401) {
+              emitAuthUnauthorized();
+            }
+            const msg = extractApiErrorMessage(
+              xhr.status,
+              parsed,
+              xhr.statusText || 'Animal detection upload failed'
+            );
+            reject(new ApiBridgeError(msg, xhr.status));
+          }
+        };
+        xhr.onerror = () => {
+          reject(
+            new ApiBridgeError(
+              `Network error uploading animal image to ${url}.`,
+              0
+            )
+          );
+        };
+        xhr.send(formData);
+      });
+    } else {
+      const headers: Record<string, string> = {};
+      if (params.idempotencyKey && params.idempotencyKey.trim()) {
+        headers['Idempotency-Key'] = params.idempotencyKey.trim();
+      }
+      dto = await apiRequest<ApiAnimalDetectionDto>('/detections/upload', {
+        method: 'POST',
+        body: formData,
+        headers,
+      });
+    }
+
+    return mapAnimalDetectionFromApi(dto, this.getAnimalDetectionImageUrl(dto.id), baseUrl);
+  },
+
+  async getAnimalIdentities(params: {
+    page?: number;
+    pageSize?: number;
+    species?: string;
+    status?: string;
+    verificationStatus?: string;
+    search?: string;
+  } = {}): Promise<{ items: AnimalIdentitySummary[]; total: number }> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const qs = new URLSearchParams();
+    qs.set('page', String(params.page ?? 1));
+    qs.set('page_size', String(params.pageSize ?? 50));
+    if (params.species && params.species !== 'All') qs.set('species', params.species);
+    if (params.status && params.status !== 'All') qs.set('status', params.status);
+    if (params.verificationStatus && params.verificationStatus !== 'All') {
+      qs.set('verification_status', params.verificationStatus);
+    }
+    if (params.search && params.search.trim()) qs.set('search', params.search.trim());
+    const res = await apiRequest<PaginatedApiResponse<ApiAnimalIdentitySummaryDto>>(
+      `/animal-intelligence/animals?${qs.toString()}`
+    );
+    return {
+      items: res.items.map((dto) => mapAnimalIdentitySummaryFromApi(dto, baseUrl)),
+      total: res.total,
+    };
+  },
+
+  async getAnimalIdentityDetail(animalId: string): Promise<AnimalIdentityDetail> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const dto = await apiRequest<ApiAnimalIdentityDetailDto>(
+      `/animal-intelligence/animals/${animalId}`
+    );
+    return mapAnimalIdentityDetailFromApi(dto, baseUrl);
+  },
+
+  async getAnimalIdentitySightings(animalId: string): Promise<AnimalSighting[]> {
+    const res = await apiRequest<PaginatedApiResponse<ApiSightingDto>>(
+      `/animal-intelligence/animals/${animalId}/sightings?page=1&page_size=50`
+    );
+    return res.items.map(mapSightingFromApi);
+  },
+
+  async getReidMatches(params: {
+    page?: number;
+    pageSize?: number;
+    decision?: string;
+    reviewStatus?: string;
+    species?: string;
+    needsReviewOnly?: boolean;
+  } = {}): Promise<{ items: ReidMatchRecord[]; total: number }> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const qs = new URLSearchParams();
+    qs.set('page', String(params.page ?? 1));
+    qs.set('page_size', String(params.pageSize ?? 50));
+    if (params.decision && params.decision !== 'All') qs.set('decision', params.decision);
+    if (params.reviewStatus && params.reviewStatus !== 'All') {
+      qs.set('review_status', params.reviewStatus);
+    }
+    if (params.species && params.species !== 'All') qs.set('species', params.species);
+    if (params.needsReviewOnly) qs.set('needs_review_only', 'true');
+    const res = await apiRequest<PaginatedApiResponse<ApiReidMatchDto>>(
+      `/animal-intelligence/matches?${qs.toString()}`
+    );
+    return {
+      items: res.items.map((dto) => mapReidMatchFromApi(dto, baseUrl)),
+      total: res.total,
+    };
+  },
+
+  async reviewReidMatch(
+    matchId: string,
+    payload: {
+      action: 'confirm' | 'reject' | 'mark_needs_review' | 'reassign';
+      reviewedBy?: string;
+      reason?: string;
+      targetAnimalIdentityId?: string;
+      createNewIdentity?: boolean;
+    }
+  ): Promise<ReidMatchRecord> {
+    const baseUrl = getConfiguredApiBaseUrl();
+    const dto = await apiRequest<ApiReidMatchDto>(
+      `/animal-intelligence/matches/${matchId}/review`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          action: payload.action,
+          reason: payload.reason?.trim() || null,
+          target_animal_identity_id: payload.targetAnimalIdentityId || null,
+          create_new_identity: Boolean(payload.createNewIdentity),
+        }),
+      }
+    );
+    return mapReidMatchFromApi(dto, baseUrl);
+  },
+
+  async getAlertRules(): Promise<AlertRuleRecord[]> {
+    const res = await apiRequest<PaginatedApiResponse<ApiAlertRuleDto>>(
+      '/animal-intelligence/alert-rules?page=1&page_size=100'
+    );
+    return res.items.map(mapAlertRuleFromApi);
+  },
+
+  async createAlertRule(input: AlertRuleCreateInput): Promise<AlertRuleRecord> {
+    const dto = await apiRequest<ApiAlertRuleDto>('/animal-intelligence/alert-rules', {
+      method: 'POST',
+      body: JSON.stringify(mapAlertRuleToCreatePayload(input)),
+    });
+    return mapAlertRuleFromApi(dto);
+  },
+
+  async updateAlertRule(
+    ruleId: string,
+    updates: Partial<AlertRuleCreateInput>
+  ): Promise<AlertRuleRecord> {
+    const payload: Record<string, unknown> = {};
+    if (updates.name !== undefined) payload.name = updates.name.trim();
+    if (updates.speciesFilter !== undefined) payload.species_filter = updates.speciesFilter || null;
+    if (updates.riskLevel !== undefined) payload.risk_level = updates.riskLevel;
+    if (updates.villageId !== undefined) payload.village_id = updates.villageId || null;
+    if (updates.zoneName !== undefined) payload.zone_name = updates.zoneName || null;
+    if (updates.minRepeatCount !== undefined) payload.min_repeat_count = updates.minRepeatCount;
+    if (updates.timeWindowMinutes !== undefined) payload.time_window_minutes = updates.timeWindowMinutes;
+    if (updates.minSpeciesConfidence !== undefined) payload.min_species_confidence = updates.minSpeciesConfidence;
+    if (updates.enabled !== undefined) payload.enabled = updates.enabled;
+    if (updates.autoNotifyOfficer !== undefined) payload.auto_notify_officer = updates.autoNotifyOfficer;
+    if (updates.autoDispatchIotBoundary !== undefined) {
+      payload.auto_dispatch_iot_boundary = updates.autoDispatchIotBoundary;
+    }
+    if (updates.description !== undefined) payload.description = updates.description || null;
+    const dto = await apiRequest<ApiAlertRuleDto>(`/animal-intelligence/alert-rules/${ruleId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+    return mapAlertRuleFromApi(dto);
+  },
+
+  async deleteAlertRule(ruleId: string): Promise<void> {
+    await apiRequest<{ status: string; id: string }>(
+      `/animal-intelligence/alert-rules/${ruleId}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  async getForestOfficers(): Promise<ForestOfficerRecord[]> {
+    const res = await apiRequest<PaginatedApiResponse<ApiForestOfficerDto>>(
+      '/animal-intelligence/officers?page=1&page_size=100'
+    );
+    return res.items.map(mapForestOfficerFromApi);
+  },
+
+  async getAlertDeliveries(alertId?: string): Promise<AlertDeliveryAttemptRecord[]> {
+    const qs = alertId ? `?alert_id=${encodeURIComponent(alertId)}&page=1&page_size=100` : '?page=1&page_size=100';
+    const res = await apiRequest<PaginatedApiResponse<ApiAlertDeliveryAttemptDto>>(
+      `/animal-intelligence/deliveries${qs}`
+    );
+    return res.items.map(mapAlertDeliveryAttemptFromApi);
+  },
+
+  async getIotEvents(): Promise<IotEventRecord[]> {
+    const res = await apiRequest<PaginatedApiResponse<ApiIotEventDto>>(
+      '/iot/events?page=1&page_size=100'
+    );
+    return res.items.map(mapIotEventFromApi);
+  },
+
+  async dispatchDevTestIotEvent(input: {
+    cameraId?: string;
+    deviceCode: string;
+    species: string;
+    animalIdentityId?: string;
+    confidence: number;
+    riskLevel: string;
+  }): Promise<IotEventRecord> {
+    const dto = await apiRequest<ApiIotEventDto>('/iot/events/dev-test', {
+      method: 'POST',
+      body: JSON.stringify({
+        camera_id: input.cameraId || null,
+        device_code: input.deviceCode.trim(),
+        species: input.species.trim(),
+        animal_identity_id: input.animalIdentityId || null,
+        confidence: input.confidence,
+        risk_level: input.riskLevel,
+      }),
+    });
+    return mapIotEventFromApi(dto);
+  },
+
+  async acknowledgeIotEvent(
+    eventId: string,
+    cameraKey: string,
+    acknowledgedBy?: string,
+    ackNote?: string
+  ): Promise<IotEventRecord> {
+    const dto = await apiRequest<ApiIotEventDto>(`/iot/events/${eventId}/acknowledge`, {
+      method: 'POST',
+      headers: {
+        'X-Camera-Key': cameraKey.trim(),
+      },
+      body: JSON.stringify({
+        acknowledged_by: acknowledgedBy?.trim() || null,
+        ack_note: ackNote?.trim() || null,
+      }),
+    });
+    return mapIotEventFromApi(dto);
+  },
+
+  async retryIotEvent(eventId: string): Promise<IotEventRecord> {
+    const dto = await apiRequest<ApiIotEventDto>(`/iot/events/${eventId}/retry`, {
+      method: 'POST',
+    });
+    return mapIotEventFromApi(dto);
   },
 
   async executePrediction(

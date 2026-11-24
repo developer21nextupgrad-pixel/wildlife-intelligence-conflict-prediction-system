@@ -6,6 +6,7 @@ from sqlalchemy import cast, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Alert, Incident, RiskZone, Sighting, Village
 from app.schemas.common import GeoJSONFeature, GeoJSONFeatureCollection
 from app.services.filters import apply_date_window, apply_division_filter
@@ -21,7 +22,11 @@ from app.services.spatial import (
 router = APIRouter(prefix="/gis", tags=["GIS Spatial"])
 
 
-@router.get("/features", response_model=GeoJSONFeatureCollection)
+@router.get(
+    "/features",
+    response_model=GeoJSONFeatureCollection,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_gis_features(
     layer: str | None = Query(
         default=None,
@@ -125,7 +130,11 @@ def get_gis_features(
     return GeoJSONFeatureCollection(count=len(features), features=features)
 
 
-@router.get("/risk-zones", response_model=GeoJSONFeatureCollection)
+@router.get(
+    "/risk-zones",
+    response_model=GeoJSONFeatureCollection,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_gis_risk_zones(
     division: str | None = Query(default=None),
     district: str | None = Query(default=None),
@@ -147,7 +156,11 @@ def get_gis_risk_zones(
     return GeoJSONFeatureCollection(count=len(features), features=features)
 
 
-@router.get("/nearby-incidents", response_model=GeoJSONFeatureCollection)
+@router.get(
+    "/nearby-incidents",
+    response_model=GeoJSONFeatureCollection,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_nearby_incidents(
     lat: float = Query(..., ge=-90.0, le=90.0),
     lng: float = Query(..., ge=-180.0, le=180.0),

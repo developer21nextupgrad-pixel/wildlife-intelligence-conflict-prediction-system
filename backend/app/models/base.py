@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
+import json
 import uuid
 
 from geoalchemy2 import Geometry
-from sqlalchemy import Boolean, DateTime, Text, func, text
+from pgvector.sqlalchemy import Vector as PGVector
+from sqlalchemy import JSON, Boolean, DateTime, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import CHAR, TypeDecorator
@@ -29,6 +31,36 @@ class PortableGeometry(TypeDecorator):
                 )
             )
         return dialect.type_descriptor(Text())
+
+
+class PortableVector(TypeDecorator):
+    """Native pgvector VECTOR(dim) on PostgreSQL; JSON float list on SQLite engines."""
+
+    impl = JSON
+    comparator_factory = PGVector.comparator_factory
+    cache_ok = True
+
+    def __init__(self, dim: int = 768) -> None:
+        super().__init__()
+        self.dim = dim
+
+    def load_dialect_impl(self, dialect):
+        if dialect is not None and dialect.name == "postgresql":
+            return dialect.type_descriptor(PGVector(self.dim))
+        return dialect.type_descriptor(JSON())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return [float(x) for x in value]
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [float(x) for x in json.loads(value)]
+        return [float(x) for x in value]
+
 
 
 class GUID(TypeDecorator):

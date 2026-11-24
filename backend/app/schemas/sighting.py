@@ -76,6 +76,10 @@ class SightingResponse(BaseModel):
     observer_role: str
     verified_by_forest_guard: bool
     photo_url: str | None = None
+    animal_detection_id: UUID | None = None
+    animal_identity_id: UUID | None = None
+    camera_id: UUID | None = None
+    village_id: UUID | None = None
     is_demo: bool
     created_at: datetime
     updated_at: datetime

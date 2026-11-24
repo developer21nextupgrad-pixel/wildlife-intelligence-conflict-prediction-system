@@ -8,6 +8,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Camera, ThermalFrame, Village
 from app.schemas.camera import (
     CameraCreate,
@@ -31,7 +32,11 @@ logger = logging.getLogger("wicps.cameras")
 router = APIRouter(prefix="/cameras", tags=["Thermal Cameras"])
 
 
-@router.get("", response_model=PaginatedResponse[CameraResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[CameraResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_cameras(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -74,7 +79,12 @@ def list_cameras(
     )
 
 
-@router.post("", response_model=CameraCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=CameraCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def register_camera(
     payload: CameraCreate,
     db: Session = Depends(get_db),
@@ -143,7 +153,11 @@ def register_camera(
     return CameraCreateResponse(**base, api_key=plaintext_key)
 
 
-@router.patch("/{camera_id}", response_model=CameraResponse)
+@router.patch(
+    "/{camera_id}",
+    response_model=CameraResponse,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def update_camera(
     camera_id: uuid.UUID,
     payload: CameraUpdate,
@@ -203,7 +217,7 @@ def camera_heartbeat(
     return CameraResponse.model_validate(record)
 
 
-@router.delete("/{camera_id}")
+@router.delete("/{camera_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_camera(camera_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, Any]:
     record = db.get(Camera, camera_id)
     if not record:

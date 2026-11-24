@@ -23,10 +23,12 @@ from fastapi import (
 from PIL import Image
 from pydantic import ValidationError
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_non_production, require_roles
 from app.models import Camera, ThermalFrame
 from app.schemas.common import PaginatedResponse
 from app.schemas.ingest import (
@@ -101,6 +103,7 @@ def _persist_frame_outcome(
     capture_mode: str,
     source_filename: str | None,
     is_dev_test: bool,
+    ingest_idempotency_key: str | None = None,
 ) -> ThermalFrame:
     frame_id = uuid.uuid4()
     date_prefix = outcome.captured_at.astimezone(timezone.utc).strftime("%Y-%m-%d")
@@ -138,6 +141,7 @@ def _persist_frame_outcome(
         processed_object_key=processed_key,
         processing_status="preprocessed" if outcome.qc_passed else "qc_failed",
         is_dev_test=is_dev_test,
+        ingest_idempotency_key=ingest_idempotency_key,
     )
     db.add(record)
     return record
@@ -191,9 +195,11 @@ async def _read_upload_bounded(upload: UploadFile, max_bytes: int, label: str) -
 
 @router.post("/frames", response_model=ThermalFrameResponse, status_code=status.HTTP_201_CREATED)
 async def ingest_camera_frame(
+    response: Response,
     file: UploadFile = File(...),
     metadata: str = Form(...),
     x_camera_key: str | None = Header(default=None, alias="X-Camera-Key"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     storage: ObjectStorageBackend = Depends(get_storage_backend),
@@ -210,7 +216,7 @@ async def ingest_camera_frame(
     except (json.JSONDecodeError, ValidationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid ingestion metadata contract: {exc}",
+            detail="Invalid ingestion metadata contract.",
         ) from exc
 
     camera = db.execute(
@@ -227,6 +233,38 @@ async def ingest_camera_frame(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid X-Camera-Key credentials for camera.",
         )
+
+    captured_ts = (
+        contract.timestamp.astimezone(timezone.utc)
+        if contract.timestamp.tzinfo
+        else contract.timestamp.replace(tzinfo=timezone.utc)
+    )
+    eff_idem = idempotency_key.strip()[:128] if idempotency_key and idempotency_key.strip() else None
+
+    if eff_idem:
+        existing_by_key = db.execute(
+            select(ThermalFrame).where(ThermalFrame.ingest_idempotency_key == eff_idem)
+        ).scalar_one_or_none()
+        if existing_by_key is not None:
+            if existing_by_key.camera_id != camera.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Idempotency-Key is already bound to a different camera.",
+                )
+            response.status_code = status.HTTP_200_OK
+            return _frame_to_response(existing_by_key, camera)
+
+    existing_by_seq = db.execute(
+        select(ThermalFrame).where(
+            ThermalFrame.camera_id == camera.id,
+            ThermalFrame.capture_mode == "http_push",
+            ThermalFrame.frame_index == contract.sequence_number,
+            ThermalFrame.captured_at == captured_ts,
+        )
+    ).scalar_one_or_none()
+    if existing_by_seq is not None:
+        response.status_code = status.HTTP_200_OK
+        return _frame_to_response(existing_by_seq, camera)
 
     filename = Path(file.filename or "frame.png").name
     ext = Path(filename).suffix.lower()
@@ -248,7 +286,7 @@ async def ingest_camera_frame(
     outcome = process_image_bytes(
         raw_bytes,
         filename=filename,
-        captured_at=contract.timestamp,
+        captured_at=captured_ts,
         frame_index=contract.sequence_number,
     )
     record = _persist_frame_outcome(
@@ -259,9 +297,38 @@ async def ingest_camera_frame(
         capture_mode="http_push",
         source_filename=filename,
         is_dev_test=camera.is_dev_test,
+        ingest_idempotency_key=eff_idem,
     )
     camera.last_heartbeat_at = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        for key in (record.raw_object_key, record.processed_object_key):
+            if key:
+                try:
+                    storage.delete(key)
+                except Exception:
+                    logger.warning("Cleanup delete failed for duplicate frame key=%s", key)
+        winner = None
+        if eff_idem:
+            winner = db.execute(
+                select(ThermalFrame).where(ThermalFrame.ingest_idempotency_key == eff_idem)
+            ).scalar_one_or_none()
+        if winner is None:
+            winner = db.execute(
+                select(ThermalFrame).where(
+                    ThermalFrame.camera_id == camera.id,
+                    ThermalFrame.capture_mode == "http_push",
+                    ThermalFrame.frame_index == contract.sequence_number,
+                    ThermalFrame.captured_at == captured_ts,
+                )
+            ).scalar_one_or_none()
+        if winner is not None and winner.camera_id == camera.id:
+            response.status_code = status.HTTP_200_OK
+            return _frame_to_response(winner, camera)
+        raise
+
     db.refresh(record)
     logger.info(
         "Ingested HTTP frame camera_code=%s frame_id=%s qc_passed=%s",
@@ -276,6 +343,7 @@ async def ingest_camera_frame(
     "/dev-sample",
     response_model=DevSampleIngestResponse,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_non_production), Depends(require_roles("operator"))],
 )
 async def ingest_dev_sample(
     file: UploadFile = File(...),
@@ -421,7 +489,11 @@ async def ingest_dev_sample(
     )
 
 
-@router.get("/frames", response_model=PaginatedResponse[ThermalFrameResponse])
+@router.get(
+    "/frames",
+    response_model=PaginatedResponse[ThermalFrameResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_ingested_frames(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -514,7 +586,7 @@ def _render_raw_browser_preview(raw_bytes: bytes) -> bytes:
     return encoded.tobytes()
 
 
-@router.get("/frames/{frame_id}/image")
+@router.get("/frames/{frame_id}/image", dependencies=[Depends(require_roles("operator"))])
 def get_frame_image(
     frame_id: uuid.UUID,
     variant: Literal["raw", "processed"] = Query(default="processed"),
@@ -570,7 +642,11 @@ def get_frame_image(
     )
 
 
-@router.post("/rtsp/test-pull", response_model=RtspTestPullResponse)
+@router.post(
+    "/rtsp/test-pull",
+    response_model=RtspTestPullResponse,
+    dependencies=[Depends(require_non_production), Depends(require_roles("operator"))],
+)
 def rtsp_test_pull(
     payload: RtspTestPullRequest,
     db: Session = Depends(get_db),
@@ -592,6 +668,7 @@ def rtsp_test_pull(
             payload.rtsp_url,
             max_frames=min(payload.max_frames, settings.rtsp_test_max_frames * 2),
             timeout_seconds=min(payload.timeout_seconds, settings.rtsp_test_timeout_seconds * 2.5),
+            allowed_hosts=settings.rtsp_allowed_hosts_set,
         )
     except ValueError as exc:
         raise HTTPException(

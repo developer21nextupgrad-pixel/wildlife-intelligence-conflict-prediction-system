@@ -26,6 +26,13 @@ class ThermalFrame(TimestampMixin, Base):
         CheckConstraint("height >= 0", name="ck_thermal_frames_height"),
         Index("ix_thermal_frames_camera_captured", "camera_id", "captured_at"),
         Index("ix_thermal_frames_qc_status", "qc_passed", "processing_status"),
+        Index(
+            "ix_thermal_frames_camera_dedup",
+            "camera_id",
+            "capture_mode",
+            "frame_index",
+            "captured_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
@@ -52,4 +59,7 @@ class ThermalFrame(TimestampMixin, Base):
     raw_object_key: Mapped[str] = mapped_column(String(512), nullable=False)
     processed_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     processing_status: Mapped[str] = mapped_column(String(32), nullable=False, default="ingested")
+    ingest_idempotency_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, unique=True, index=True
+    )
     is_dev_test: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)

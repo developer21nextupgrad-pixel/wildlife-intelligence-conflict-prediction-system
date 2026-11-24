@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: wicps-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: standard # >= 2 GB RAM required for MegaDetector + SpeciesNet + MegaDescriptor inference
+    healthCheckPath: /api/v1/health
+    preDeployCommand: alembic -c alembic.ini upgrade head
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: API_V1_PREFIX
+        value: /api/v1
+      - key: AUTH_ENABLED
+        value: "true"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: S3_USE_SSL
+        value: "true"
+      - key: SPECIESNET_PRELOAD_ON_STARTUP
+        value: "true"
+      - key: MEGADESCRIPTOR_PRELOAD_ON_STARTUP
+        value: "true"
+      - key: CORS_ORIGIN_REGEX
+        value: ""
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_JWT_SECRET
+        sync: false
+      - key: AUTH_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: AUTH_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false

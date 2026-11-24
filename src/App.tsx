@@ -12,6 +12,14 @@ import {
 import { apiBridge, SystemSettings } from './services/apiBridge';
 import { AlertUpsertInput } from './utils/apiMappers';
 import { filterWicpsDatasets } from './utils/wicpsFilters';
+import {
+  AuthenticatedUserProfile,
+  canManageAdmin,
+  clearStoredAuthSession,
+  getStoredAuthToken,
+  onAuthUnauthorized,
+} from './utils/authStorage';
+import { AuthLoginGate } from './components/AuthLoginGate';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
@@ -26,6 +34,7 @@ import { AnalyticsView } from './components/AnalyticsView';
 import { UserManagementView } from './components/UserManagementView';
 import { SettingsView } from './components/SettingsView';
 import { ThermalIngestionView } from './components/ThermalIngestionView';
+import { AnimalDetectionView } from './components/AnimalDetectionView';
 import { Menu, X, TreePine, Users, Server, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function App() {
@@ -41,6 +50,10 @@ export default function App() {
 
   // Administration Sub-tab (Personnel vs System Bridge)
   const [adminSubTab, setAdminSubTab] = useState<'personnel' | 'bridge'>('personnel');
+
+  // Authentication & RBAC Session State
+  const [currentUser, setCurrentUser] = useState<AuthenticatedUserProfile | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState<boolean>(true);
 
   // Core Data States
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -139,8 +152,53 @@ export default function App() {
   };
 
   useEffect(() => {
-    refreshAllData();
+    let active = true;
+    const unsubscribe = onAuthUnauthorized(() => {
+      if (!active) return;
+      setCurrentUser(null);
+      setApiError(null);
+    });
+
+    async function verifyExistingSession() {
+      const token = getStoredAuthToken();
+      if (!token) {
+        if (active) {
+          setCurrentUser(null);
+          setIsCheckingSession(false);
+          setIsLoading(false);
+        }
+        return;
+      }
+      try {
+        const profile = await apiBridge.getCurrentUser();
+        if (active) {
+          setCurrentUser(profile);
+        }
+      } catch {
+        clearStoredAuthSession();
+        if (active) {
+          setCurrentUser(null);
+          setIsLoading(false);
+        }
+      } finally {
+        if (active) {
+          setIsCheckingSession(false);
+        }
+      }
+    }
+
+    verifyExistingSession();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
+
+  useEffect(() => {
+    if (currentUser) {
+      refreshAllData();
+    }
+  }, [currentUser]);
 
   // Apply Global Division and Date Filters consistently across datasets
   const filteredData = useMemo(
@@ -301,6 +359,47 @@ export default function App() {
     await refreshAllData();
   };
 
+  const handleLogout = () => {
+    apiBridge.logout();
+    setCurrentUser(null);
+    setIncidents([]);
+    setSightings([]);
+    setVillages([]);
+    setAlerts([]);
+    setRiskZones([]);
+    setApiError(null);
+  };
+
+  if (isCheckingSession) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white space-y-4">
+        <div className="w-14 h-14 rounded-2xl bg-emerald-600 flex items-center justify-center animate-bounce shadow-xl shadow-emerald-500/20 border border-emerald-400/40">
+          <TreePine className="w-8 h-8 text-white" />
+        </div>
+        <div className="text-center">
+          <div className="text-xs uppercase font-mono tracking-widest text-emerald-400 font-bold">
+            FOREST DEPARTMENT • GOVT. OF UTTAR PRADESH • INDIA
+          </div>
+          <h2 className="text-base font-bold font-mono tracking-wider text-white mt-1">
+            WICPS COMMAND PLATFORM
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">Verifying authenticated session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <AuthLoginGate
+        onAuthenticated={(user) => {
+          setIsLoading(true);
+          setCurrentUser(user);
+        }}
+      />
+    );
+  }
+
   if (isLoading || !settings) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white space-y-4">
@@ -309,12 +408,12 @@ export default function App() {
         </div>
         <div className="text-center">
           <div className="text-xs uppercase font-mono tracking-widest text-emerald-400 font-bold">
-            FOREST DEPARTMENT • GOVT. OF Uttar Pradesh • INDIA
+            FOREST DEPARTMENT • GOVT. OF UTTAR PRADESH • INDIA
           </div>
           <h2 className="text-base font-bold font-mono tracking-wider text-white mt-1">
             WICPS COMMAND PLATFORM
           </h2>
-          <p className="text-xs text-slate-400 mt-1">Initializing GIS layers and demo datasets...</p>
+          <p className="text-xs text-slate-400 mt-1">Initializing GIS layers and operational telemetry...</p>
         </div>
       </div>
     );
@@ -333,6 +432,9 @@ export default function App() {
     if (activeTab === 'alerts') return 'alert-management';
     if (activeTab === 'patrols') return 'patrol-operations';
     if (activeTab === 'analytics') return 'analytics-reports';
+    if (activeTab === 'detection' || activeTab === 'detections' || activeTab === 'species-id') {
+      return 'animal-detection';
+    }
     if (activeTab === 'thermal' || activeTab === 'ingestion') return 'thermal-ingestion';
     if (activeTab === 'settings' || activeTab === 'users') return 'administration';
     return activeTab;
@@ -342,6 +444,8 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-slate-950 font-sans text-slate-100 selection:bg-emerald-600 selection:text-white antialiased">
       {/* Top Header */}
       <Header
+        currentUser={currentUser}
+        onLogout={handleLogout}
         setActiveTab={setActiveTab}
         onNavigateAdmin={(subTab) => {
           setAdminSubTab(subTab);
@@ -549,7 +653,7 @@ export default function App() {
               onAddIncident={handleAddIncident}
               onUpdateIncident={handleUpdateIncident}
               onUpdateStatus={handleUpdateIncidentStatus}
-              onDeleteIncident={handleDeleteIncident}
+              onDeleteIncident={canManageAdmin(currentUser) ? handleDeleteIncident : undefined}
               isApiLoading={isSyncingApi}
               apiError={apiError}
               onRetrySync={refreshAllData}
@@ -568,7 +672,7 @@ export default function App() {
               onResetGlobalFilters={handleResetGlobalFilters}
               onAddSighting={handleAddSighting}
               onUpdateSighting={handleUpdateSighting}
-              onDeleteSighting={handleDeleteSighting}
+              onDeleteSighting={canManageAdmin(currentUser) ? handleDeleteSighting : undefined}
               isApiLoading={isSyncingApi}
               apiError={apiError}
               onRetrySync={refreshAllData}
@@ -581,7 +685,7 @@ export default function App() {
               alerts={filteredData.alerts}
               onCreateAlert={handleCreateAlert}
               onUpdateAlert={handleUpdateAlert}
-              onDeleteAlert={handleDeleteAlert}
+              onDeleteAlert={canManageAdmin(currentUser) ? handleDeleteAlert : undefined}
               onAcknowledge={handleAcknowledgeAlert}
               onUpdateResponseStatus={handleUpdateAlertResponse}
               isApiLoading={isSyncingApi}
@@ -597,7 +701,7 @@ export default function App() {
               onUpdateStatus={handleUpdatePatrolStatus}
               onCreatePatrol={handleCreatePatrol}
               onUpdatePatrol={handleUpdatePatrol}
-              onDeletePatrol={handleDeletePatrol}
+              onDeletePatrol={canManageAdmin(currentUser) ? handleDeletePatrol : undefined}
               onNavigateToMap={() => setActiveTab('wildlife-risk-map')}
               isApiLoading={isSyncingApi}
               apiError={apiError}
@@ -619,9 +723,18 @@ export default function App() {
             />
           )}
 
+          {/* 9.4. Animal Detection, Individual Re-Identification & Intelligence Integration (Phase 1-3) */}
+          {resolvedTab === 'animal-detection' && (
+            <AnimalDetectionView
+              currentUser={currentUser}
+              villages={villages}
+              onDataIntegrated={refreshAllData}
+            />
+          )}
+
           {/* 9.5. Thermal Ingestion (Stage 1 Boundary & CV Preprocessing) */}
           {resolvedTab === 'thermal-ingestion' && (
-            <ThermalIngestionView villages={villages} />
+            <ThermalIngestionView currentUser={currentUser} villages={villages} />
           )}
 
           {/* 10. Administration (Personnel & FastAPI/PostGIS System Bridge) */}
@@ -672,9 +785,10 @@ export default function App() {
 
               {/* Sub-tab views */}
               {adminSubTab === 'personnel' ? (
-                <UserManagementView staff={staff} />
+                <UserManagementView currentUser={currentUser} staff={staff} />
               ) : (
                 <SettingsView
+                  currentUser={currentUser}
                   settings={settings}
                   onUpdateSettings={handleUpdateSettings}
                   onResetData={handleResetData}

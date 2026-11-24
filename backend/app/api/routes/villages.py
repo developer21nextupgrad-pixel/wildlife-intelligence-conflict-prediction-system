@@ -5,6 +5,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, is_postgres_backend
+from app.core.security import require_roles
 from app.models import Village
 from app.schemas.common import PaginatedResponse
 from app.schemas.village import VillageCreate, VillageResponse, VillageUpdate
@@ -14,7 +15,11 @@ from app.services.spatial import make_point_geom
 router = APIRouter(prefix="/villages", tags=["Villages"])
 
 
-@router.get("", response_model=PaginatedResponse[VillageResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[VillageResponse],
+    dependencies=[Depends(require_roles("operator"))],
+)
 def list_villages(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
@@ -62,7 +67,11 @@ def list_villages(
     )
 
 
-@router.get("/{village_id}", response_model=VillageResponse)
+@router.get(
+    "/{village_id}",
+    response_model=VillageResponse,
+    dependencies=[Depends(require_roles("operator"))],
+)
 def get_village(village_id: uuid.UUID, db: Session = Depends(get_db)) -> VillageResponse:
     record = db.get(Village, village_id)
     if not record:
@@ -70,7 +79,12 @@ def get_village(village_id: uuid.UUID, db: Session = Depends(get_db)) -> Village
     return VillageResponse.model_validate(record)
 
 
-@router.post("", response_model=VillageResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=VillageResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def create_village(
     payload: VillageCreate, db: Session = Depends(get_db)
 ) -> VillageResponse:
@@ -99,7 +113,11 @@ def create_village(
     return VillageResponse.model_validate(record)
 
 
-@router.put("/{village_id}", response_model=VillageResponse)
+@router.put(
+    "/{village_id}",
+    response_model=VillageResponse,
+    dependencies=[Depends(require_roles("admin"))],
+)
 def update_village(
     village_id: uuid.UUID,
     payload: VillageUpdate,
@@ -123,7 +141,7 @@ def update_village(
     return VillageResponse.model_validate(record)
 
 
-@router.delete("/{village_id}")
+@router.delete("/{village_id}", dependencies=[Depends(require_roles("admin"))])
 def delete_village(village_id: uuid.UUID, db: Session = Depends(get_db)) -> dict[str, str]:
     record = db.get(Village, village_id)
     if not record:

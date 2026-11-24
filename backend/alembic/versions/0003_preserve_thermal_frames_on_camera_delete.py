@@ -7,7 +7,7 @@ Create Date: 2026-11-20 03:40:00
 """
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
@@ -18,6 +18,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _camera_fk_names(bind: sa.Connection) -> list[str]:
+    if context.is_offline_mode():
+        return ["thermal_frames_camera_id_fkey"]
     inspector = sa.inspect(bind)
     names: list[str] = []
     for fk in inspector.get_foreign_keys("thermal_frames"):

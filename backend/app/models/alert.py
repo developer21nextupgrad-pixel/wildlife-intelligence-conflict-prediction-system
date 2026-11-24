@@ -43,3 +43,29 @@ class Alert(TimestampMixin, DemoFlagMixin, Base):
     response_status: Mapped[str] = mapped_column(
         String(48), nullable=False, default="Pending Dispatch"
     )
+
+    # Phase 2/3 additive intelligence links
+    sighting_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("sightings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    animal_identity_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("animal_identities.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+    )
+    animal_detection_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("animal_detections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    alert_rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(),
+        ForeignKey("alert_rules.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+        index=True,
+    )
+    image_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    risk_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_ref_key: Mapped[str | None] = mapped_column(
+        String(160), nullable=True, unique=True, index=True
+    )
+

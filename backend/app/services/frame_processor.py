@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import io
+import ipaddress
 import os
 from pathlib import Path
+import socket
 import tempfile
 from typing import Any
 from urllib.parse import urlsplit
@@ -435,23 +437,121 @@ def process_video_bytes(
                 pass
 
 
+_BLOCKED_METADATA_HOSTS = {
+    "localhost",
+    "localhost.localdomain",
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+}
+
+
+def _is_public_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+        or not ip_obj.is_global
+    ):
+        return False
+    # Reject IPv4-mapped IPv6 addresses resolving to non-global IPv4
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped is not None:
+        return _is_public_ip(ip_obj.ipv4_mapped)
+    return True
+
+
+def validate_rtsp_url_safe(
+    rtsp_url: str,
+    *,
+    allowed_hosts: set[str] | None = None,
+) -> str:
+    """Validates RTSP URL scheme/host and blocks SSRF into loopback, private, link-local, and metadata IPs."""
+    cleaned = rtsp_url.strip()
+    parsed = urlsplit(cleaned)
+    if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
+        raise ValueError(
+            "Invalid RTSP URL. Must start with rtsp:// or rtsps:// and include a host."
+        )
+
+    port = parsed.port or (322 if parsed.scheme.lower() == "rtsps" else 554)
+    if not (1 <= port <= 65535):
+        raise ValueError("Invalid RTSP URL port.")
+
+    hostname = parsed.hostname.strip().lower().rstrip(".")
+    allowlist = {h.lower() for h in (allowed_hosts or set()) if h.strip()}
+    if hostname in allowlist:
+        return cleaned
+
+    if hostname in _BLOCKED_METADATA_HOSTS or hostname.endswith(".local") or hostname.endswith(".internal"):
+        raise ValueError(
+            f"RTSP host '{hostname}' is blocked for SSRF protection (internal/loopback/metadata hosts disallowed)."
+        )
+
+    try:
+        ip_literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        ip_literal = None
+
+    if ip_literal is not None:
+        if not _is_public_ip(ip_literal):
+            raise ValueError(
+                f"RTSP address '{ip_literal}' is blocked for SSRF protection (non-public IP range)."
+            )
+        return cleaned
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise RtspConnectionError(f"Unable to resolve RTSP hostname '{hostname}': {exc}") from exc
+
+    resolved_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in addr_infos:
+        sockaddr = info[4]
+        raw_ip = str(sockaddr[0]).split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        resolved_ips.append(ip_obj)
+        if not _is_public_ip(ip_obj):
+            raise ValueError(
+                f"RTSP host '{hostname}' resolves to blocked non-public IP '{ip_obj}'."
+            )
+
+    if not resolved_ips:
+        raise RtspConnectionError(f"RTSP hostname '{hostname}' did not resolve to any valid IP address.")
+
+    return cleaned
+
+
 def test_pull_rtsp_stream(
     rtsp_url: str,
     *,
     max_frames: int = 5,
     timeout_seconds: float = 8.0,
+    allowed_hosts: set[str] | None = None,
 ) -> list[FrameProcessingOutcome]:
-    parsed = urlsplit(rtsp_url.strip())
-    if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
-        raise ValueError("Invalid RTSP URL. Must start with rtsp:// or rtsps:// and include a host.")
-
-    prev_opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-    timeout_us = int(max(1.0, timeout_seconds) * 1_000_000)
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;tcp|stimeout;{timeout_us}"
+    cleaned_url = validate_rtsp_url_safe(rtsp_url, allowed_hosts=allowed_hosts)
+    timeout_ms = int(max(1.0, timeout_seconds) * 1000)
 
     cap = None
     try:
-        cap = cv2.VideoCapture(rtsp_url.strip(), cv2.CAP_FFMPEG)
+        cap_params = [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+            timeout_ms,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+            timeout_ms,
+        ]
+        try:
+            cap = cv2.VideoCapture(cleaned_url, cv2.CAP_FFMPEG, cap_params)
+        except (TypeError, cv2.error):
+            cap = cv2.VideoCapture(cleaned_url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_ms)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_ms)
+
         if not cap.isOpened():
             raise RtspConnectionError("Unable to connect to RTSP stream within timeout.")
 
@@ -482,7 +582,3 @@ def test_pull_rtsp_stream(
     finally:
         if cap is not None:
             cap.release()
-        if prev_opts is None:
-            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
-        else:
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev_opts

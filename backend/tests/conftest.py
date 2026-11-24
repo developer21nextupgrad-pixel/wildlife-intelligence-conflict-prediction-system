@@ -1,5 +1,6 @@
 from collections.abc import Generator
 import os
+import uuid
 
 from fastapi.testclient import TestClient
 import pytest
@@ -9,8 +10,62 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.core.database import Base, get_db
+from app.core.security import create_access_token
 from app.main import create_application
 from app.services.seed import seed_demo_data
+
+TEST_JWT_SECRET = "test-only-hs256-jwt-signing-secret-32bytes-minimum"
+
+
+def make_test_settings(**overrides) -> Settings:
+    params = {
+        "environment": "test",
+        "auto_seed_demo_data": False,
+        "rate_limit_requests": 500,
+        "rate_limit_window_seconds": 60,
+        "auth_enabled": True,
+        "auth_jwt_secret": TEST_JWT_SECRET,
+    }
+    params.update(overrides)
+    return Settings(**params)
+
+
+def make_test_token(
+    settings: Settings,
+    *,
+    role: str = "admin",
+    subject: str | None = None,
+    email: str | None = None,
+    display_name: str | None = None,
+    user_id: uuid.UUID | None = None,
+) -> str:
+    norm_role = role.strip().lower()
+    return create_access_token(
+        subject=subject or f"test-{norm_role}@wicps.test",
+        email=email or f"test-{norm_role}@wicps.test",
+        display_name=display_name or f"Test {norm_role.title()}",
+        role=norm_role,
+        settings=settings,
+        user_id=user_id,
+    )
+
+
+def auth_headers(
+    settings: Settings,
+    *,
+    role: str = "admin",
+    subject: str | None = None,
+    email: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, str]:
+    token = make_test_token(
+        settings,
+        role=role,
+        subject=subject,
+        email=email,
+        display_name=display_name,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(scope="session")
@@ -57,21 +112,50 @@ def db_session(test_engine) -> Generator[Session, None, None]:
 
 
 @pytest.fixture()
-def client(db_session: Session) -> Generator[TestClient, None, None]:
-    settings = Settings(
-        environment="test",
-        auto_seed_demo_data=False,
-        rate_limit_requests=500,
-        rate_limit_window_seconds=60,
-    )
-    app = create_application(settings)
+def test_settings() -> Settings:
+    return make_test_settings()
+
+
+@pytest.fixture()
+def anon_client(db_session: Session, test_settings: Settings) -> Generator[TestClient, None, None]:
+    app = create_application(test_settings)
 
     def _override_get_db() -> Generator[Session, None, None]:
         yield db_session
 
     app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
+    with TestClient(app) as raw_client:
+        yield raw_client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def client(anon_client: TestClient, test_settings: Settings) -> Generator[TestClient, None, None]:
+    anon_client.headers.update(auth_headers(test_settings, role="admin"))
+    yield anon_client
+
+
+@pytest.fixture()
+def operator_client(
+    db_session: Session, test_settings: Settings
+) -> Generator[TestClient, None, None]:
+    app = create_application(test_settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    with TestClient(app) as tc:
+        tc.headers.update(auth_headers(test_settings, role="operator"))
+        yield tc
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def reviewer_client(
+    db_session: Session, test_settings: Settings
+) -> Generator[TestClient, None, None]:
+    app = create_application(test_settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    with TestClient(app) as tc:
+        tc.headers.update(auth_headers(test_settings, role="reviewer"))
+        yield tc
     app.dependency_overrides.clear()
 
 

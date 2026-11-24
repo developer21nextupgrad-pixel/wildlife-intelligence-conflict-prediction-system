@@ -1,15 +1,30 @@
 import {
+  AlertDeliveryAttemptRecord,
   AlertNotification,
+  AlertRuleCreateInput,
+  AlertRuleRecord,
+  AnimalBoundingBox,
+  AnimalDetectionItem,
+  AnimalDetectionRecord,
+  AnimalDetectionStatus,
+  AnimalEmbeddingImage,
+  AnimalIdentityDetail,
+  AnimalIdentitySummary,
   AnimalSighting,
   CameraProtocol,
   CameraStatus,
   CameraZoneType,
   DevSampleIngestResult,
+  ForestOfficerRecord,
+  IdentityReviewLog,
   Incident,
   IncidentSeverity,
   IncidentStatus,
   IncidentType,
+  IotEventRecord,
   PatrolOperation,
+  ReidCandidate,
+  ReidMatchRecord,
   RiskZone,
   RtspTestPullResult,
   SpeciesType,
@@ -910,3 +925,701 @@ export function maskRtspUrlCredentials(rawUrl: string): string {
   return trimmed.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/@\s]+)@/g, '$1***:***@');
 }
 
+// --- Phase 1: Animal Detection & SpeciesNet Identification DTOs and Helpers ---
+
+export interface ApiAnimalBoundingBoxDto {
+  xmin: number;
+  ymin: number;
+  width: number;
+  height: number;
+  pixel_xmin: number;
+  pixel_ymin: number;
+  pixel_width: number;
+  pixel_height: number;
+}
+
+export interface ApiClassificationCandidateDto {
+  species_label: string;
+  common_name?: string | null;
+  scientific_name?: string | null;
+  confidence: number;
+}
+
+export interface ApiReidCandidateDto {
+  animal_identity_id: string;
+  animal_code: string;
+  species: string;
+  similarity_score: number;
+  crop_image_url?: string | null;
+}
+
+export interface ApiCropQualityDto {
+  passed: boolean;
+  reason?: string | null;
+  width: number;
+  height: number;
+  blur_score: number;
+}
+
+export interface ApiAnimalDetectionItemDto {
+  index: number;
+  category: 'animal' | 'human' | 'vehicle';
+  detector_confidence: number;
+  bbox: ApiAnimalBoundingBoxDto;
+  species_label: string;
+  common_name?: string | null;
+  scientific_name?: string | null;
+  taxonomic_level?: string | null;
+  taxonomy_raw?: string | null;
+  species_confidence: number;
+  prediction_source?: string | null;
+  needs_review: boolean;
+  top_candidates?: ApiClassificationCandidateDto[];
+  individual_reid_status?: string;
+  reid_match_id?: string | null;
+  embedding_id?: string | null;
+  animal_identity_id?: string | null;
+  animal_code?: string | null;
+  reid_decision?: string | null;
+  reid_review_status?: string | null;
+  reid_similarity_score?: number | null;
+  reid_review_reason?: string | null;
+  reid_top_candidates?: ApiReidCandidateDto[];
+  crop_object_key?: string | null;
+  crop_image_url?: string | null;
+  crop_quality?: ApiCropQualityDto | null;
+}
+
+export interface ApiAnimalDetectionModelMetadataDto {
+  detector_model: string;
+  classifier_model: string;
+  speciesnet_version: string;
+  geofence_enabled: boolean;
+  country_code?: string | null;
+  admin1_region?: string | null;
+  min_detection_confidence: number;
+  min_species_confidence: number;
+  thermal_imagery_supported: boolean;
+  imagery_notice: string;
+  reid_enabled?: boolean;
+  reid_model?: string | null;
+  reid_license?: string | null;
+  reid_match_threshold?: number | null;
+  reid_ambiguous_threshold?: number | null;
+}
+
+export interface ApiLinkedAlertSummaryDto {
+  id: string;
+  title: string;
+  severity: string;
+  affected_village: string;
+  assigned_officer?: string | null;
+  response_status: string;
+  risk_reason?: string | null;
+}
+
+export interface ApiAnimalDetectionDto {
+  id: string;
+  source_filename: string;
+  content_type: string;
+  file_size_bytes: number;
+  width: number;
+  height: number;
+  image_object_key: string;
+  image_url: string;
+  storage_backend: string;
+  processing_status: AnimalDetectionStatus;
+  detection_count: number;
+  animal_count: number;
+  primary_species?: string | null;
+  primary_common_name?: string | null;
+  primary_scientific_name?: string | null;
+  primary_confidence?: number | null;
+  country_code?: string | null;
+  admin1_region?: string | null;
+  camera_id?: string | null;
+  village_id?: string | null;
+  captured_at?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  location_name?: string | null;
+  idempotency_key?: string | null;
+  generated_sighting_id?: string | null;
+  sighting_integration_status?: string | null;
+  generated_alert_ids?: string[];
+  generated_alerts?: ApiLinkedAlertSummaryDto[];
+  detector_model: string;
+  classifier_model: string;
+  inference_duration_ms: number;
+  detections: ApiAnimalDetectionItemDto[];
+  model_metadata: ApiAnimalDetectionModelMetadataDto;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function resolveBackendAssetUrl(
+  rawPath: string | null | undefined,
+  apiBaseUrl?: string
+): string | null {
+  if (!rawPath) return null;
+  if (/^https?:\/\//i.test(rawPath)) return rawPath;
+  if (!apiBaseUrl) return rawPath;
+  const trimmedBase = apiBaseUrl.replace(/\/api\/v1\/?$/, '').replace(/\/$/, '');
+  return `${trimmedBase}${rawPath.startsWith('/') ? rawPath : `/${rawPath}`}`;
+}
+
+export function mapAnimalDetectionFromApi(
+  dto: ApiAnimalDetectionDto,
+  resolvedImageUrl?: string,
+  apiBaseUrl?: string
+): AnimalDetectionRecord {
+  return {
+    id: dto.id,
+    sourceFilename: dto.source_filename,
+    contentType: dto.content_type,
+    fileSizeBytes: dto.file_size_bytes,
+    width: dto.width,
+    height: dto.height,
+    imageObjectKey: dto.image_object_key,
+    imageUrl: resolvedImageUrl || resolveBackendAssetUrl(dto.image_url, apiBaseUrl) || dto.image_url,
+    storageBackend: dto.storage_backend,
+    processingStatus: dto.processing_status,
+    detectionCount: dto.detection_count,
+    animalCount: dto.animal_count,
+    primarySpecies: dto.primary_species ?? null,
+    primaryCommonName: dto.primary_common_name ?? null,
+    primaryScientificName: dto.primary_scientific_name ?? null,
+    primaryConfidence: dto.primary_confidence ?? null,
+    countryCode: dto.country_code ?? null,
+    admin1Region: dto.admin1_region ?? null,
+    cameraId: dto.camera_id ?? null,
+    villageId: dto.village_id ?? null,
+    capturedAt: dto.captured_at ?? null,
+    latitude: dto.latitude ?? null,
+    longitude: dto.longitude ?? null,
+    locationName: dto.location_name ?? null,
+    idempotencyKey: dto.idempotency_key ?? null,
+    generatedSightingId: dto.generated_sighting_id ?? null,
+    sightingIntegrationStatus: dto.sighting_integration_status ?? null,
+    generatedAlertIds: dto.generated_alert_ids || [],
+    generatedAlerts: (dto.generated_alerts || []).map((a) => ({
+      id: a.id,
+      title: a.title,
+      severity: a.severity,
+      affectedVillage: a.affected_village,
+      assignedOfficer: a.assigned_officer ?? null,
+      responseStatus: a.response_status,
+      riskReason: a.risk_reason ?? null,
+    })),
+    detectorModel: dto.detector_model,
+    classifierModel: dto.classifier_model,
+    inferenceDurationMs: dto.inference_duration_ms,
+    detections: (dto.detections || []).map((item): AnimalDetectionItem => ({
+      index: item.index,
+      category: item.category,
+      detectorConfidence: item.detector_confidence,
+      bbox: {
+        xmin: item.bbox.xmin,
+        ymin: item.bbox.ymin,
+        width: item.bbox.width,
+        height: item.bbox.height,
+        pixelXmin: item.bbox.pixel_xmin,
+        pixelYmin: item.bbox.pixel_ymin,
+        pixelWidth: item.bbox.pixel_width,
+        pixelHeight: item.bbox.pixel_height,
+      },
+      speciesLabel: item.species_label,
+      commonName: item.common_name ?? null,
+      scientificName: item.scientific_name ?? null,
+      taxonomicLevel: item.taxonomic_level ?? null,
+      taxonomyRaw: item.taxonomy_raw ?? null,
+      speciesConfidence: item.species_confidence,
+      predictionSource: item.prediction_source ?? null,
+      needsReview: Boolean(item.needs_review),
+      topCandidates: (item.top_candidates || []).map((cand) => ({
+        speciesLabel: cand.species_label,
+        commonName: cand.common_name ?? null,
+        scientificName: cand.scientific_name ?? null,
+        confidence: cand.confidence,
+      })),
+      individualReIdStatus: item.individual_reid_status || 'phase2_not_enabled',
+      reidMatchId: item.reid_match_id ?? null,
+      embeddingId: item.embedding_id ?? null,
+      animalIdentityId: item.animal_identity_id ?? null,
+      animalCode: item.animal_code ?? null,
+      reidDecision: item.reid_decision ?? null,
+      reidReviewStatus: item.reid_review_status ?? null,
+      reidSimilarityScore: item.reid_similarity_score ?? null,
+      reidReviewReason: item.reid_review_reason ?? null,
+      reidTopCandidates: (item.reid_top_candidates || []).map(
+        (c): ReidCandidate => ({
+          animalIdentityId: c.animal_identity_id,
+          animalCode: c.animal_code,
+          species: c.species,
+          similarityScore: c.similarity_score,
+          cropImageUrl: resolveBackendAssetUrl(c.crop_image_url, apiBaseUrl),
+        })
+      ),
+      cropObjectKey: item.crop_object_key ?? null,
+      cropImageUrl: resolveBackendAssetUrl(item.crop_image_url, apiBaseUrl),
+      cropQuality: item.crop_quality
+        ? {
+            passed: Boolean(item.crop_quality.passed),
+            reason: item.crop_quality.reason ?? null,
+            width: item.crop_quality.width,
+            height: item.crop_quality.height,
+            blurScore: item.crop_quality.blur_score,
+          }
+        : null,
+    })),
+    modelMetadata: {
+      detectorModel: dto.model_metadata?.detector_model || dto.detector_model,
+      classifierModel: dto.model_metadata?.classifier_model || dto.classifier_model,
+      speciesnetVersion: dto.model_metadata?.speciesnet_version || '4.0.3a',
+      geofenceEnabled: Boolean(dto.model_metadata?.geofence_enabled ?? true),
+      countryCode: dto.model_metadata?.country_code ?? dto.country_code ?? null,
+      admin1Region: dto.model_metadata?.admin1_region ?? dto.admin1_region ?? null,
+      minDetectionConfidence: dto.model_metadata?.min_detection_confidence ?? 0.2,
+      minSpeciesConfidence: dto.model_metadata?.min_species_confidence ?? 0.5,
+      thermalImagerySupported: Boolean(dto.model_metadata?.thermal_imagery_supported ?? false),
+      imageryNotice: dto.model_metadata?.imagery_notice || '',
+      reidEnabled: Boolean(dto.model_metadata?.reid_enabled ?? false),
+      reidModel: dto.model_metadata?.reid_model ?? null,
+      reidLicense: dto.model_metadata?.reid_license ?? null,
+      reidMatchThreshold: dto.model_metadata?.reid_match_threshold ?? null,
+      reidAmbiguousThreshold: dto.model_metadata?.reid_ambiguous_threshold ?? null,
+    },
+    errorMessage: dto.error_message ?? null,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+const ANIMAL_DETECTION_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png']);
+export const MAX_ANIMAL_DETECTION_IMAGE_BYTES = 25 * 1024 * 1024;
+
+export function validateAnimalDetectionFile(file: {
+  name: string;
+  size: number;
+}): { valid: true; extension: string } | { valid: false; error: string } {
+  const name = (file.name || '').trim();
+  const dotIdx = name.lastIndexOf('.');
+  const ext = dotIdx >= 0 ? name.slice(dotIdx).toLowerCase() : '';
+
+  if (!ANIMAL_DETECTION_EXTENSIONS.has(ext)) {
+    return {
+      valid: false,
+      error: `Unsupported image format "${ext || 'none'}". Upload a JPG, JPEG, or PNG image.`,
+    };
+  }
+  if (file.size <= 0) {
+    return { valid: false, error: 'Selected image file is empty (0 bytes).' };
+  }
+  if (file.size > MAX_ANIMAL_DETECTION_IMAGE_BYTES) {
+    return {
+      valid: false,
+      error: `Image exceeds maximum allowed size of 25 MB (${(file.size / (1024 * 1024)).toFixed(1)} MB).`,
+    };
+  }
+  return { valid: true, extension: ext };
+}
+
+export function clampBoundingBoxPercent(bbox: AnimalBoundingBox): {
+  leftPct: number;
+  topPct: number;
+  widthPct: number;
+  heightPct: number;
+} {
+  const xmin = Number.isFinite(bbox.xmin) ? Math.max(0, Math.min(1, bbox.xmin)) : 0;
+  const ymin = Number.isFinite(bbox.ymin) ? Math.max(0, Math.min(1, bbox.ymin)) : 0;
+  const w = Number.isFinite(bbox.width) ? Math.max(0, Math.min(1 - xmin, bbox.width)) : 0;
+  const h = Number.isFinite(bbox.height) ? Math.max(0, Math.min(1 - ymin, bbox.height)) : 0;
+  return {
+    leftPct: Number((xmin * 100).toFixed(3)),
+    topPct: Number((ymin * 100).toFixed(3)),
+    widthPct: Number((w * 100).toFixed(3)),
+    heightPct: Number((h * 100).toFixed(3)),
+  };
+}
+
+export function formatDetectionSpeciesDisplay(item: AnimalDetectionItem): {
+  label: string;
+  subtitle: string | null;
+  isUncertain: boolean;
+} {
+  if (item.needsReview) {
+    const candidateHint =
+      item.commonName && item.commonName !== 'Unknown / Needs Review'
+        ? `Best low-confidence candidate: ${item.commonName}`
+        : 'Confidence below verification threshold';
+    return {
+      label: 'Unknown / Needs Review',
+      subtitle: candidateHint,
+      isUncertain: true,
+    };
+  }
+  return {
+    label: item.speciesLabel || item.commonName || 'Unknown / Needs Review',
+    subtitle: item.scientificName || null,
+    isUncertain: false,
+  };
+}
+
+// --- Phase 2 & Phase 3: Animal Registry, Matches, Alert Rules, Officers, Deliveries, IoT ---
+
+export interface ApiAnimalIdentitySummaryDto {
+  id: string;
+  animal_code: string;
+  species: string;
+  scientific_name?: string | null;
+  species_prefix: string;
+  status: string;
+  verification_status: string;
+  primary_crop_url?: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  total_sightings: number;
+  reference_image_count: number;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAnimalEmbeddingImageDto {
+  id: string;
+  detection_id: string;
+  detection_item_index: number;
+  animal_identity_id?: string | null;
+  crop_image_url: string;
+  source_image_url: string;
+  species: string;
+  model_name: string;
+  model_version: string;
+  embedding_dim: number;
+  crop_width: number;
+  crop_height: number;
+  blur_score: number;
+  quality_passed: boolean;
+  is_reference: boolean;
+  created_at: string;
+}
+
+export interface ApiIdentityReviewLogDto {
+  id: string;
+  match_id: string;
+  animal_identity_id?: string | null;
+  previous_animal_id?: string | null;
+  action: string;
+  reviewed_by: string;
+  reviewed_at: string;
+  reason?: string | null;
+}
+
+export interface ApiReidMatchDto {
+  id: string;
+  detection_id: string;
+  embedding_id: string;
+  detection_item_index: number;
+  species: string;
+  matched_animal_id?: string | null;
+  matched_animal_code?: string | null;
+  suggested_animal_id?: string | null;
+  suggested_animal_code?: string | null;
+  similarity_score?: number | null;
+  decision: string;
+  review_status: string;
+  review_reason?: string | null;
+  top_candidates?: ApiReidCandidateDto[];
+  crop_image_url: string;
+  source_image_url: string;
+  model_version: string;
+  thresholds_snapshot?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAnimalIdentityDetailDto extends ApiAnimalIdentitySummaryDto {
+  images: ApiAnimalEmbeddingImageDto[];
+  matches: ApiReidMatchDto[];
+  review_logs: ApiIdentityReviewLogDto[];
+}
+
+export interface ApiAlertRuleDto {
+  id: string;
+  name: string;
+  species_filter?: string | null;
+  risk_level: IncidentSeverity;
+  village_id?: string | null;
+  zone_name?: string | null;
+  min_repeat_count: number;
+  time_window_minutes: number;
+  min_species_confidence: number;
+  enabled: boolean;
+  auto_notify_officer: boolean;
+  auto_dispatch_iot_boundary: boolean;
+  description?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiForestOfficerDto {
+  id: string;
+  name: string;
+  badge_number: string;
+  role: string;
+  forest_range: string;
+  district: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  whatsapp_opt_in: boolean;
+  sms_opt_in: boolean;
+  contact_channel: string;
+  duty_status: string;
+  on_duty: boolean;
+  notification_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiAlertDeliveryAttemptDto {
+  id: string;
+  alert_id: string;
+  officer_id?: string | null;
+  officer_name: string;
+  channel: string;
+  routing_basis: string;
+  distance_km?: number | null;
+  status: string;
+  attempt_number: number;
+  detail?: string | null;
+  attempted_at: string;
+}
+
+export interface ApiIotEventDto {
+  id: string;
+  alert_id?: string | null;
+  camera_id?: string | null;
+  device_code: string;
+  animal_identity_id?: string | null;
+  species: string;
+  confidence: number;
+  risk_level: string;
+  event_type: string;
+  is_dev_test: boolean;
+  payload_json: Record<string, unknown>;
+  delivery_status: string;
+  retry_count: number;
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  ack_note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export function mapAnimalIdentitySummaryFromApi(
+  dto: ApiAnimalIdentitySummaryDto,
+  apiBaseUrl?: string
+): AnimalIdentitySummary {
+  return {
+    id: dto.id,
+    animalCode: dto.animal_code,
+    species: dto.species,
+    scientificName: dto.scientific_name ?? null,
+    speciesPrefix: dto.species_prefix,
+    status: dto.status,
+    verificationStatus: dto.verification_status,
+    primaryCropUrl: resolveBackendAssetUrl(dto.primary_crop_url, apiBaseUrl),
+    firstSeenAt: dto.first_seen_at,
+    lastSeenAt: dto.last_seen_at,
+    totalSightings: dto.total_sightings,
+    referenceImageCount: dto.reference_image_count,
+    notes: dto.notes ?? null,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+export function mapAnimalEmbeddingImageFromApi(
+  dto: ApiAnimalEmbeddingImageDto,
+  apiBaseUrl?: string
+): AnimalEmbeddingImage {
+  return {
+    id: dto.id,
+    detectionId: dto.detection_id,
+    detectionItemIndex: dto.detection_item_index,
+    animalIdentityId: dto.animal_identity_id ?? null,
+    cropImageUrl: resolveBackendAssetUrl(dto.crop_image_url, apiBaseUrl) || dto.crop_image_url,
+    sourceImageUrl: resolveBackendAssetUrl(dto.source_image_url, apiBaseUrl) || dto.source_image_url,
+    species: dto.species,
+    modelName: dto.model_name,
+    modelVersion: dto.model_version,
+    embeddingDim: dto.embedding_dim,
+    cropWidth: dto.crop_width,
+    cropHeight: dto.crop_height,
+    blurScore: dto.blur_score,
+    qualityPassed: Boolean(dto.quality_passed),
+    isReference: Boolean(dto.is_reference),
+    createdAt: dto.created_at,
+  };
+}
+
+export function mapReidMatchFromApi(
+  dto: ApiReidMatchDto,
+  apiBaseUrl?: string
+): ReidMatchRecord {
+  return {
+    id: dto.id,
+    detectionId: dto.detection_id,
+    embeddingId: dto.embedding_id,
+    detectionItemIndex: dto.detection_item_index,
+    species: dto.species,
+    matchedAnimalId: dto.matched_animal_id ?? null,
+    matchedAnimalCode: dto.matched_animal_code ?? null,
+    suggestedAnimalId: dto.suggested_animal_id ?? null,
+    suggestedAnimalCode: dto.suggested_animal_code ?? null,
+    similarityScore: dto.similarity_score ?? null,
+    decision: dto.decision,
+    reviewStatus: dto.review_status,
+    reviewReason: dto.review_reason ?? null,
+    topCandidates: (dto.top_candidates || []).map((c) => ({
+      animalIdentityId: c.animal_identity_id,
+      animalCode: c.animal_code,
+      species: c.species,
+      similarityScore: c.similarity_score,
+      cropImageUrl: resolveBackendAssetUrl(c.crop_image_url, apiBaseUrl),
+    })),
+    cropImageUrl: resolveBackendAssetUrl(dto.crop_image_url, apiBaseUrl) || dto.crop_image_url,
+    sourceImageUrl: resolveBackendAssetUrl(dto.source_image_url, apiBaseUrl) || dto.source_image_url,
+    modelVersion: dto.model_version,
+    thresholdsSnapshot: dto.thresholds_snapshot || {},
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+export function mapIdentityReviewLogFromApi(dto: ApiIdentityReviewLogDto): IdentityReviewLog {
+  return {
+    id: dto.id,
+    matchId: dto.match_id,
+    animalIdentityId: dto.animal_identity_id ?? null,
+    previousAnimalId: dto.previous_animal_id ?? null,
+    action: dto.action,
+    reviewedBy: dto.reviewed_by,
+    reviewedAt: dto.reviewed_at,
+    reason: dto.reason ?? null,
+  };
+}
+
+export function mapAnimalIdentityDetailFromApi(
+  dto: ApiAnimalIdentityDetailDto,
+  apiBaseUrl?: string
+): AnimalIdentityDetail {
+  return {
+    ...mapAnimalIdentitySummaryFromApi(dto, apiBaseUrl),
+    images: (dto.images || []).map((img) => mapAnimalEmbeddingImageFromApi(img, apiBaseUrl)),
+    matches: (dto.matches || []).map((m) => mapReidMatchFromApi(m, apiBaseUrl)),
+    reviewLogs: (dto.review_logs || []).map(mapIdentityReviewLogFromApi),
+  };
+}
+
+export function mapAlertRuleFromApi(dto: ApiAlertRuleDto): AlertRuleRecord {
+  return {
+    id: dto.id,
+    name: dto.name,
+    speciesFilter: dto.species_filter ?? null,
+    riskLevel: dto.risk_level,
+    villageId: dto.village_id ?? null,
+    zoneName: dto.zone_name ?? null,
+    minRepeatCount: dto.min_repeat_count,
+    timeWindowMinutes: dto.time_window_minutes,
+    minSpeciesConfidence: dto.min_species_confidence,
+    enabled: Boolean(dto.enabled),
+    autoNotifyOfficer: Boolean(dto.auto_notify_officer),
+    autoDispatchIotBoundary: Boolean(dto.auto_dispatch_iot_boundary),
+    description: dto.description ?? null,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+export function mapAlertRuleToCreatePayload(
+  input: AlertRuleCreateInput
+): Record<string, unknown> {
+  return {
+    name: input.name.trim(),
+    species_filter: input.speciesFilter?.trim() || null,
+    risk_level: input.riskLevel,
+    village_id: input.villageId || null,
+    zone_name: input.zoneName?.trim() || null,
+    min_repeat_count: input.minRepeatCount,
+    time_window_minutes: input.timeWindowMinutes,
+    min_species_confidence: input.minSpeciesConfidence,
+    enabled: input.enabled,
+    auto_notify_officer: input.autoNotifyOfficer,
+    auto_dispatch_iot_boundary: input.autoDispatchIotBoundary,
+    description: input.description?.trim() || null,
+  };
+}
+
+export function mapForestOfficerFromApi(dto: ApiForestOfficerDto): ForestOfficerRecord {
+  return {
+    id: dto.id,
+    name: dto.name,
+    badgeNumber: dto.badge_number,
+    role: dto.role,
+    forestRange: dto.forest_range,
+    district: dto.district,
+    latitude: dto.latitude ?? null,
+    longitude: dto.longitude ?? null,
+    whatsappOptIn: Boolean(dto.whatsapp_opt_in),
+    smsOptIn: Boolean(dto.sms_opt_in),
+    contactChannel: dto.contact_channel,
+    dutyStatus: dto.duty_status,
+    onDuty: Boolean(dto.on_duty),
+    notificationEnabled: Boolean(dto.notification_enabled),
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
+
+export function mapAlertDeliveryAttemptFromApi(
+  dto: ApiAlertDeliveryAttemptDto
+): AlertDeliveryAttemptRecord {
+  return {
+    id: dto.id,
+    alertId: dto.alert_id,
+    officerId: dto.officer_id ?? null,
+    officerName: dto.officer_name,
+    channel: dto.channel,
+    routingBasis: dto.routing_basis,
+    distanceKm: dto.distance_km ?? null,
+    status: dto.status,
+    attemptNumber: dto.attempt_number,
+    detail: dto.detail ?? null,
+    attemptedAt: dto.attempted_at,
+  };
+}
+
+export function mapIotEventFromApi(dto: ApiIotEventDto): IotEventRecord {
+  return {
+    id: dto.id,
+    alertId: dto.alert_id ?? null,
+    cameraId: dto.camera_id ?? null,
+    deviceCode: dto.device_code,
+    animalIdentityId: dto.animal_identity_id ?? null,
+    species: dto.species,
+    confidence: dto.confidence,
+    riskLevel: dto.risk_level,
+    eventType: dto.event_type,
+    isDevTest: Boolean(dto.is_dev_test),
+    payloadJson: dto.payload_json || {},
+    deliveryStatus: dto.delivery_status,
+    retryCount: dto.retry_count,
+    acknowledgedAt: dto.acknowledged_at ?? null,
+    acknowledgedBy: dto.acknowledged_by ?? null,
+    ackNote: dto.ack_note ?? null,
+    createdAt: dto.created_at,
+    updatedAt: dto.updated_at,
+  };
+}
