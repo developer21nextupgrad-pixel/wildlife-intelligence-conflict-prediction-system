@@ -324,6 +324,22 @@ def get_current_principal(
     return decode_and_verify_token(credentials.credentials.strip(), settings)
 
 
+def get_optional_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedPrincipal | None:
+    """Optionally verifies a Bearer JWT without raising 401 when missing, malformed, or expired."""
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    raw_token = credentials.credentials.strip()
+    if not raw_token:
+        return None
+    try:
+        return decode_and_verify_token(raw_token, settings)
+    except HTTPException:
+        return None
+
+
 def require_roles(*allowed_roles: str) -> Callable[..., AuthenticatedPrincipal]:
     required = {r.strip().lower() for r in allowed_roles if r.strip()}
 

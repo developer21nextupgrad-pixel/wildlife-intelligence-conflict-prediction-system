@@ -15,10 +15,53 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 3000);
 const API_PREFIX = (process.env.API_V1_PREFIX || '/api/v1').replace(/\/+$/, '');
+const CONTROL_PLANE_PORT = process.env.CONTROL_PLANE_PORT
+  ? Number(process.env.CONTROL_PLANE_PORT)
+  : null;
 const FASTAPI_SIDECAR_HOST = process.env.FASTAPI_SIDECAR_HOST || '127.0.0.1';
-const FASTAPI_SIDECAR_PORT = Number(process.env.FASTAPI_SIDECAR_PORT || 8001);
-const FASTAPI_SIDECAR_URL =
-  process.env.FASTAPI_SIDECAR_URL || `http://${FASTAPI_SIDECAR_HOST}:${FASTAPI_SIDECAR_PORT}`;
+const REQUESTED_SIDECAR_PORT = Number(process.env.FASTAPI_SIDECAR_PORT || 8001);
+const FASTAPI_SIDECAR_PORT =
+  CONTROL_PLANE_PORT !== null && REQUESTED_SIDECAR_PORT === CONTROL_PLANE_PORT
+    ? CONTROL_PLANE_PORT + 1
+    : REQUESTED_SIDECAR_PORT;
+
+function isLoopbackHost(hostname: string): boolean {
+  const norm = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return norm === '127.0.0.1' || norm === 'localhost' || norm === '0.0.0.0' || norm === '::1';
+}
+
+function resolveFastApiSidecarConfig(): { url: string; hasExternalSidecar: boolean } {
+  const fallbackLocalUrl = `http://${FASTAPI_SIDECAR_HOST}:${FASTAPI_SIDECAR_PORT}`;
+  const rawEnvUrl = (process.env.FASTAPI_SIDECAR_URL || '').trim();
+  if (!rawEnvUrl) {
+    return { url: fallbackLocalUrl, hasExternalSidecar: false };
+  }
+  try {
+    const parsed = new URL(rawEnvUrl);
+    const effectivePort = parsed.port
+      ? Number(parsed.port)
+      : parsed.protocol === 'https:'
+      ? 443
+      : 80;
+    if (
+      CONTROL_PLANE_PORT !== null &&
+      isLoopbackHost(parsed.hostname) &&
+      effectivePort === CONTROL_PLANE_PORT
+    ) {
+      console.warn(
+        `[WICPS] Ignoring FASTAPI_SIDECAR_URL=${rawEnvUrl} because port ${CONTROL_PLANE_PORT} is reserved by platform CONTROL_PLANE_PORT; using local FastAPI sidecar at ${fallbackLocalUrl}.`
+      );
+      return { url: fallbackLocalUrl, hasExternalSidecar: false };
+    }
+    return { url: rawEnvUrl.replace(/\/+$/, ''), hasExternalSidecar: true };
+  } catch {
+    return { url: fallbackLocalUrl, hasExternalSidecar: false };
+  }
+}
+
+const SIDECAR_CONFIG = resolveFastApiSidecarConfig();
+const FASTAPI_SIDECAR_URL = SIDECAR_CONFIG.url;
+const HAS_EXTERNAL_FASTAPI_SIDECAR = SIDECAR_CONFIG.hasExternalSidecar;
 let fastApiProcess: ChildProcess | null = null;
 
 // --- Domain Types (snake_case DTOs matching FastAPI backend) ---
@@ -1334,7 +1377,7 @@ app.use(
     `${API_PREFIX}/health`,
   ],
   (req: Request, res: Response, next) => {
-    if (fastApiProcess !== null || Boolean(process.env.FASTAPI_SIDECAR_URL)) {
+    if (fastApiProcess !== null || HAS_EXTERNAL_FASTAPI_SIDECAR) {
       return forwardToFastApiSidecar(req, res);
     }
     return next();
@@ -2476,9 +2519,12 @@ async function startFastApiSidecar(): Promise<void> {
   }
   const backendDir = path.resolve(__dirname, 'backend');
   const venvBinDir = path.join(backendDir, '.venv', 'bin');
+  const venvPython = path.join(venvBinDir, 'python');
   const uvicornBin = path.join(venvBinDir, 'uvicorn');
   const alembicBin = path.join(venvBinDir, 'alembic');
-  if (!fs.existsSync(uvicornBin)) {
+  const useVenvUvicorn = fs.existsSync(uvicornBin);
+  const useVenvPython = fs.existsSync(venvPython);
+  if (!useVenvUvicorn && !useVenvPython) {
     console.warn('FastAPI sidecar skipped: backend/.venv/bin/uvicorn not found.');
     return;
   }
@@ -2486,6 +2532,7 @@ async function startFastApiSidecar(): Promise<void> {
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
+    FASTAPI_SIDECAR_URL,
   };
   if (!childEnv.AUTH_JWT_SECRET) {
     childEnv.AUTH_JWT_SECRET = crypto.randomBytes(32).toString('hex');
@@ -2517,6 +2564,10 @@ async function startFastApiSidecar(): Promise<void> {
   ) {
     childEnv.AUTO_SEED_DEMO_DATA = 'true';
   }
+  if (process.env.FASTAPI_SIDECAR_PRELOAD_MODELS !== 'true') {
+    childEnv.SPECIESNET_PRELOAD_ON_STARTUP = 'false';
+    childEnv.MEGADESCRIPTOR_PRELOAD_ON_STARTUP = 'false';
+  }
 
   if (fs.existsSync(alembicBin)) {
     try {
@@ -2530,15 +2581,16 @@ async function startFastApiSidecar(): Promise<void> {
     }
   }
 
-  fastApiProcess = spawn(
-    uvicornBin,
-    ['app.main:app', '--host', FASTAPI_SIDECAR_HOST, '--port', String(FASTAPI_SIDECAR_PORT)],
-    {
-      cwd: backendDir,
-      env: childEnv,
-      stdio: 'inherit',
-    }
-  );
+  const spawnCmd = useVenvUvicorn ? uvicornBin : venvPython;
+  const spawnArgs = useVenvUvicorn
+    ? ['app.main:app', '--host', FASTAPI_SIDECAR_HOST, '--port', String(FASTAPI_SIDECAR_PORT)]
+    : ['-m', 'uvicorn', 'app.main:app', '--host', FASTAPI_SIDECAR_HOST, '--port', String(FASTAPI_SIDECAR_PORT)];
+
+  fastApiProcess = spawn(spawnCmd, spawnArgs, {
+    cwd: backendDir,
+    env: childEnv,
+    stdio: 'inherit',
+  });
 
   fastApiProcess.on('exit', (code, signal) => {
     if (code !== 0 && code !== null) {
@@ -2576,9 +2628,13 @@ async function startServer() {
   await startFastApiSidecar();
 
   if (process.env.NODE_ENV !== 'production') {
+    const disableHmr = process.env.DISABLE_HMR === 'true';
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ...(disableHmr ? { hmr: false, ws: false } : {}),
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -19,6 +19,9 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision \
     && pip install --no-cache-dir -r requirements.txt \
+    && (pip uninstall -y opencv-python opencv-contrib-python || true) \
+    && pip install --no-cache-dir --force-reinstall --no-deps "opencv-python-headless>=4.10.0,<4.13.0" \
+    && python -c "import cv2; print('cv2 headless smoke test passed:', cv2.__version__)" \
     && mkdir -p /app/.cache/huggingface /app/.cache/torch /app/.cache/kagglehub
 
 COPY backend/ .

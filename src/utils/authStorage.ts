@@ -12,6 +12,8 @@ export interface AuthenticatedUserProfile {
 }
 
 export interface AuthStatusSummary {
+  authenticated: boolean;
+  user: AuthenticatedUserProfile | null;
   authEnabled: boolean;
   passwordLoginEnabled: boolean;
   oidcEnabled: boolean;

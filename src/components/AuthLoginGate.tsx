@@ -14,14 +14,24 @@ import { AuthenticatedUserProfile, AuthStatusSummary } from '../utils/authStorag
 
 interface AuthLoginGateProps {
   onAuthenticated: (user: AuthenticatedUserProfile) => void;
+  initialAuthStatus?: AuthStatusSummary | null;
 }
 
-export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({ onAuthenticated }) => {
-  const [authStatus, setAuthStatus] = useState<AuthStatusSummary | null>(null);
-  const [isLoadingStatus, setIsLoadingStatus] = useState(true);
+export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({
+  onAuthenticated,
+  initialAuthStatus = null,
+}) => {
+  const [authStatus, setAuthStatus] = useState<AuthStatusSummary | null>(initialAuthStatus);
+  const [isLoadingStatus, setIsLoadingStatus] = useState(!initialAuthStatus);
   const [statusError, setStatusError] = useState<string | null>(null);
 
-  const [mode, setMode] = useState<'login' | 'setup' | 'oidc'>('login');
+  const [mode, setMode] = useState<'login' | 'setup' | 'oidc'>(() => {
+    if (initialAuthStatus?.needsInitialSetup) return 'setup';
+    if (initialAuthStatus && !initialAuthStatus.passwordLoginEnabled && initialAuthStatus.oidcEnabled) {
+      return 'oidc';
+    }
+    return 'login';
+  });
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [setupEmail, setSetupEmail] = useState('');
@@ -32,19 +42,27 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({ onAuthenticated })
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const applyStatus = (status: AuthStatusSummary) => {
+    setAuthStatus(status);
+    if (status.authenticated && status.user) {
+      onAuthenticated(status.user);
+      return;
+    }
+    if (status.needsInitialSetup) {
+      setMode('setup');
+    } else if (!status.passwordLoginEnabled && status.oidcEnabled) {
+      setMode('oidc');
+    } else {
+      setMode('login');
+    }
+  };
+
   const loadStatus = async () => {
     setIsLoadingStatus(true);
     setStatusError(null);
     try {
       const status = await apiBridge.getAuthStatus();
-      setAuthStatus(status);
-      if (status.needsInitialSetup) {
-        setMode('setup');
-      } else if (!status.passwordLoginEnabled && status.oidcEnabled) {
-        setMode('oidc');
-      } else {
-        setMode('login');
-      }
+      applyStatus(status);
     } catch (err) {
       setStatusError(
         err instanceof Error
@@ -57,8 +75,13 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({ onAuthenticated })
   };
 
   useEffect(() => {
+    if (initialAuthStatus) {
+      applyStatus(initialAuthStatus);
+      setIsLoadingStatus(false);
+      return;
+    }
     loadStatus();
-  }, []);
+  }, [initialAuthStatus]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -14,10 +14,12 @@ import { AlertUpsertInput } from './utils/apiMappers';
 import { filterWicpsDatasets } from './utils/wicpsFilters';
 import {
   AuthenticatedUserProfile,
+  AuthStatusSummary,
   canManageAdmin,
   clearStoredAuthSession,
   getStoredAuthToken,
   onAuthUnauthorized,
+  setStoredAuthSession,
 } from './utils/authStorage';
 import { AuthLoginGate } from './components/AuthLoginGate';
 import { Header } from './components/Header';
@@ -53,6 +55,7 @@ export default function App() {
 
   // Authentication & RBAC Session State
   const [currentUser, setCurrentUser] = useState<AuthenticatedUserProfile | null>(null);
+  const [initialAuthStatus, setInitialAuthStatus] = useState<AuthStatusSummary | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState<boolean>(true);
 
   // Core Data States
@@ -156,28 +159,34 @@ export default function App() {
     const unsubscribe = onAuthUnauthorized(() => {
       if (!active) return;
       setCurrentUser(null);
+      setInitialAuthStatus(null);
       setApiError(null);
     });
 
     async function verifyExistingSession() {
       const token = getStoredAuthToken();
-      if (!token) {
-        if (active) {
+      try {
+        const status = await apiBridge.getAuthStatus();
+        if (!active) return;
+        if (status.authenticated && status.user && token) {
+          setStoredAuthSession(token, status.user);
+          setCurrentUser(status.user);
+          setInitialAuthStatus(status);
+        } else {
+          if (token) {
+            clearStoredAuthSession();
+          }
           setCurrentUser(null);
-          setIsCheckingSession(false);
+          setInitialAuthStatus({ ...status, authenticated: false, user: null });
           setIsLoading(false);
         }
-        return;
-      }
-      try {
-        const profile = await apiBridge.getCurrentUser();
-        if (active) {
-          setCurrentUser(profile);
-        }
       } catch {
-        clearStoredAuthSession();
+        if (token) {
+          clearStoredAuthSession();
+        }
         if (active) {
           setCurrentUser(null);
+          setInitialAuthStatus(null);
           setIsLoading(false);
         }
       } finally {
@@ -362,6 +371,7 @@ export default function App() {
   const handleLogout = () => {
     apiBridge.logout();
     setCurrentUser(null);
+    setInitialAuthStatus(null);
     setIncidents([]);
     setSightings([]);
     setVillages([]);
@@ -392,6 +402,7 @@ export default function App() {
   if (!currentUser) {
     return (
       <AuthLoginGate
+        initialAuthStatus={initialAuthStatus}
         onAuthenticated={(user) => {
           setIsLoading(true);
           setCurrentUser(user);

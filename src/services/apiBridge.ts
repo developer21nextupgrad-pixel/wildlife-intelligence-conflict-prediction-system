@@ -312,6 +312,8 @@ async function apiRequest<T>(
 }
 
 interface ApiAuthStatusDto {
+  authenticated?: boolean;
+  user?: ApiAuthenticatedProfileDto | null;
   auth_enabled: boolean;
   password_login_enabled: boolean;
   oidc_enabled: boolean;
@@ -388,12 +390,15 @@ export const apiBridge = {
   // --- Authentication & RBAC ---
   async getAuthStatus(baseUrlOverride?: string): Promise<AuthStatusSummary> {
     const dto = await apiRequest<ApiAuthStatusDto>('/auth/status', { method: 'GET' }, baseUrlOverride);
+    const mappedUser = dto?.user ? mapUserProfileFromApi(dto.user) : null;
     return {
-      authEnabled: dto.auth_enabled,
-      passwordLoginEnabled: dto.password_login_enabled,
-      oidcEnabled: dto.oidc_enabled,
-      oidcIssuer: dto.oidc_issuer ?? null,
-      needsInitialSetup: dto.needs_initial_setup,
+      authenticated: Boolean(dto?.authenticated && mappedUser),
+      user: mappedUser,
+      authEnabled: Boolean(dto?.auth_enabled),
+      passwordLoginEnabled: Boolean(dto?.password_login_enabled),
+      oidcEnabled: Boolean(dto?.oidc_enabled),
+      oidcIssuer: dto?.oidc_issuer ?? null,
+      needsInitialSetup: Boolean(dto?.needs_initial_setup),
     };
   },
 

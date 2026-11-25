@@ -52,11 +52,70 @@ def _png_bytes(width: int = 320, height: int = 240) -> bytes:
 
 def test_unauthenticated_requests_rejected_while_public_health_and_auth_status_open(
     anon_client: TestClient,
+    test_settings: Settings,
 ):
     assert anon_client.get("/api/v1/health").status_code == 200
     status_res = anon_client.get("/api/v1/auth/status")
     assert status_res.status_code == 200
-    assert status_res.json()["auth_enabled"] is True
+    status_body = status_res.json()
+    assert status_body["authenticated"] is False
+    assert status_body["user"] is None
+    assert status_body["auth_enabled"] is True
+
+    # Malformed or expired bearer tokens on /auth/status return HTTP 200 with authenticated=False
+    bad_status = anon_client.get(
+        "/api/v1/auth/status",
+        headers={"Authorization": "Bearer not-a-valid-jwt"},
+    )
+    assert bad_status.status_code == 200
+    assert bad_status.json()["authenticated"] is False
+    assert bad_status.json()["user"] is None
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    expired_token = jwt.encode(
+        {
+            "sub": "expired-user",
+            "email": "expired@forest.gov.in",
+            "name": "Expired Officer",
+            "role": "admin",
+            "roles": ["admin"],
+            "iss": test_settings.auth_jwt_issuer,
+            "aud": test_settings.auth_jwt_audience,
+            "iat": now_ts - 600,
+            "exp": now_ts - 60,
+        },
+        TEST_JWT_SECRET,
+        algorithm="HS256",
+    )
+    expired_status = anon_client.get(
+        "/api/v1/auth/status",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert expired_status.status_code == 200
+    assert expired_status.json()["authenticated"] is False
+    assert expired_status.json()["user"] is None
+
+    # Wrong signing secret on /auth/status also returns authenticated=False
+    wrong_sig_token = jwt.encode(
+        {
+            "sub": "forged-user",
+            "role": "admin",
+            "roles": ["admin"],
+            "iss": test_settings.auth_jwt_issuer,
+            "aud": test_settings.auth_jwt_audience,
+            "iat": now_ts,
+            "exp": now_ts + 300,
+        },
+        "completely-wrong-secret-key-not-matching-server-config",
+        algorithm="HS256",
+    )
+    wrong_sig_status = anon_client.get(
+        "/api/v1/auth/status",
+        headers={"Authorization": f"Bearer {wrong_sig_token}"},
+    )
+    assert wrong_sig_status.status_code == 200
+    assert wrong_sig_status.json()["authenticated"] is False
+    assert wrong_sig_status.json()["user"] is None
 
     protected_gets = [
         "/api/v1/auth/me",
@@ -81,12 +140,18 @@ def test_unauthenticated_requests_rejected_while_public_health_and_auth_status_o
         res = anon_client.get(path)
         assert res.status_code == 401, f"Expected 401 on GET {path}, got {res.status_code}"
 
-    # Invalid/malformed bearer tokens are rejected with 401
+    # Invalid/malformed and expired bearer tokens are rejected with 401 on protected routes
     bad_res = anon_client.get(
         "/api/v1/incidents",
         headers={"Authorization": "Bearer not-a-valid-jwt"},
     )
     assert bad_res.status_code == 401
+
+    expired_res = anon_client.get(
+        "/api/v1/incidents",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert expired_res.status_code == 401
 
 
 def test_auth_bootstrap_login_user_provisioning_and_rbac_enforcement(
@@ -121,6 +186,16 @@ def test_auth_bootstrap_login_user_provisioning_and_rbac_enforcement(
 
     admin_hdrs = {"Authorization": f"Bearer {admin_token}"}
     assert anon_client.get("/api/v1/auth/me", headers=admin_hdrs).status_code == 200
+
+    # Authenticated /auth/status returns HTTP 200 with authenticated=True and safe user profile (no password_hash)
+    auth_status_admin = anon_client.get("/api/v1/auth/status", headers=admin_hdrs)
+    assert auth_status_admin.status_code == 200
+    auth_status_body = auth_status_admin.json()
+    assert auth_status_body["authenticated"] is True
+    assert auth_status_body["needs_initial_setup"] is False
+    assert auth_status_body["user"]["email"] == "dfo-admin@forest.gov.in"
+    assert auth_status_body["user"]["role"] == "admin"
+    assert "password_hash" not in auth_status_body["user"]
 
     # Admin provisions operator & reviewer accounts
     op_create = anon_client.post(
@@ -167,6 +242,12 @@ def test_auth_bootstrap_login_user_provisioning_and_rbac_enforcement(
     op_hdrs = {"Authorization": f"Bearer {op_token}"}
     rev_hdrs = {"Authorization": f"Bearer {rev_token}"}
 
+    # Operator authenticated status check returns safe operator profile
+    op_status = anon_client.get("/api/v1/auth/status", headers=op_hdrs)
+    assert op_status.status_code == 200
+    assert op_status.json()["authenticated"] is True
+    assert op_status.json()["user"]["role"] == "operator"
+
     # Operator can read operational endpoints, cannot access admin endpoints or Re-ID review
     assert anon_client.get("/api/v1/incidents", headers=op_hdrs).status_code == 200
     assert anon_client.get("/api/v1/health/database", headers=op_hdrs).status_code == 403
@@ -201,13 +282,17 @@ def test_auth_bootstrap_login_user_provisioning_and_rbac_enforcement(
     assert anon_client.get("/api/v1/auth/users", headers=rev_hdrs).status_code == 403
     assert anon_client.get("/api/v1/health/database", headers=rev_hdrs).status_code == 403
 
-    # Deactivating user blocks subsequent logins
+    # Deactivating user blocks subsequent logins and revokes /auth/status authenticated state
     deact = anon_client.patch(
         f"/api/v1/auth/users/{op_id}",
         headers=admin_hdrs,
         json={"is_active": False},
     )
     assert deact.status_code == 200
+    deact_status = anon_client.get("/api/v1/auth/status", headers=op_hdrs)
+    assert deact_status.status_code == 200
+    assert deact_status.json()["authenticated"] is False
+    assert deact_status.json()["user"] is None
     assert (
         anon_client.post(
             "/api/v1/auth/login",

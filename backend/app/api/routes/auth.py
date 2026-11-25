@@ -18,6 +18,7 @@ from app.core.security import (
     AuthenticatedPrincipal,
     create_access_token,
     get_current_principal,
+    get_optional_principal,
     hash_password,
     require_roles,
     verify_password,
@@ -32,7 +33,20 @@ router = APIRouter(prefix="/auth", tags=["Authentication & RBAC"])
 RoleLiteral = Literal["operator", "reviewer", "admin"]
 
 
+class AuthenticatedUserProfile(BaseModel):
+    id: str | None = None
+    subject: str
+    email: str | None = None
+    display_name: str
+    role: str
+    roles: list[str]
+    effective_roles: list[str]
+    auth_method: str
+
+
 class AuthStatusResponse(BaseModel):
+    authenticated: bool = False
+    user: AuthenticatedUserProfile | None = None
     auth_enabled: bool
     password_login_enabled: bool
     oidc_enabled: bool
@@ -49,17 +63,6 @@ class BootstrapAdminRequest(BaseModel):
     email: NonEmptyStr = Field(..., max_length=255)
     display_name: NonEmptyStr = Field(..., max_length=160)
     password: str = Field(..., min_length=8, max_length=256)
-
-
-class AuthenticatedUserProfile(BaseModel):
-    id: str | None = None
-    subject: str
-    email: str | None = None
-    display_name: str
-    role: str
-    roles: list[str]
-    effective_roles: list[str]
-    auth_method: str
 
 
 class LoginResponse(BaseModel):
@@ -102,12 +105,35 @@ class UserAccountUpdateRequest(BaseModel):
 def get_auth_status(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
+    principal: AuthenticatedPrincipal | None = Depends(get_optional_principal),
 ) -> AuthStatusResponse:
     needs_setup = False
     if not settings.is_production:
         user_count = int(db.execute(select(func.count(UserAccount.id))).scalar_one() or 0)
         needs_setup = user_count == 0
+
+    safe_user: AuthenticatedUserProfile | None = None
+    if principal is not None:
+        is_valid_account = True
+        if principal.user_id is not None:
+            account = db.get(UserAccount, principal.user_id)
+            if account is None or not account.is_active:
+                is_valid_account = False
+        if is_valid_account:
+            safe_user = AuthenticatedUserProfile(
+                id=str(principal.user_id) if principal.user_id else None,
+                subject=principal.subject,
+                email=principal.email,
+                display_name=principal.display_name,
+                role=principal.primary_role,
+                roles=sorted(principal.roles),
+                effective_roles=sorted(principal.effective_roles),
+                auth_method=principal.auth_method,
+            )
+
     return AuthStatusResponse(
+        authenticated=safe_user is not None,
+        user=safe_user,
         auth_enabled=settings.auth_enabled,
         password_login_enabled=bool(settings.auth_jwt_secret),
         oidc_enabled=bool(settings.auth_oidc_jwks_url),

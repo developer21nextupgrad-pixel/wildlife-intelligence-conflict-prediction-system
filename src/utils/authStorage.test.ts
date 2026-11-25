@@ -88,3 +88,30 @@ test('getUserInitials formats initials cleanly', () => {
   assert.equal(getUserInitials('Operator'), 'OP');
   assert.equal(getUserInitials(''), 'OP');
 });
+
+test('AuthStatusSummary represents unauthenticated and authenticated states explicitly', () => {
+  const unauthStatus = {
+    authenticated: false,
+    user: null,
+    authEnabled: true,
+    passwordLoginEnabled: true,
+    oidcEnabled: false,
+    oidcIssuer: null,
+    needsInitialSetup: false,
+  };
+  assert.equal(unauthStatus.authenticated, false);
+  assert.equal(unauthStatus.user, null);
+
+  const authStatus = {
+    authenticated: true,
+    user: makeUser('admin'),
+    authEnabled: true,
+    passwordLoginEnabled: true,
+    oidcEnabled: false,
+    oidcIssuer: null,
+    needsInitialSetup: false,
+  };
+  assert.equal(authStatus.authenticated, true);
+  assert.equal(authStatus.user?.role, 'admin');
+  assert.equal(canManageAdmin(authStatus.user), true);
+});
