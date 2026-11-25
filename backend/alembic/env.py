@@ -2,9 +2,10 @@ from logging.config import fileConfig
 import os
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 from app.core.config import get_settings
+from app.core.database import normalize_database_url
 from app.models import Base
 
 config = context.config
@@ -12,9 +13,35 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-db_url = os.environ.get("DATABASE_URL") or get_settings().database_url
-config.set_main_option("sqlalchemy.url", db_url)
 
+def resolve_migration_database_url() -> str:
+    """Resolve and validate the Alembic target DATABASE_URL safely."""
+    settings = get_settings()
+    env_name = (os.environ.get("ENVIRONMENT") or settings.environment or "").strip().lower()
+    raw_env_url = (os.environ.get("DATABASE_URL") or "").strip()
+
+    if env_name == "production":
+        if not raw_env_url:
+            raise RuntimeError(
+                "Production migration error: DATABASE_URL environment variable must be explicitly set."
+            )
+        normalized = normalize_database_url(raw_env_url)
+        lowered = normalized.lower()
+        if (
+            lowered.startswith("sqlite")
+            or "@localhost" in lowered
+            or "@127.0.0.1" in lowered
+        ):
+            raise RuntimeError(
+                "Production migration error: refusing to run Alembic against SQLite or a localhost database."
+            )
+        return normalized
+
+    chosen = raw_env_url or settings.database_url or config.get_main_option("sqlalchemy.url") or ""
+    return normalize_database_url(chosen)
+
+
+db_url = resolve_migration_database_url()
 target_metadata = Base.metadata
 
 
@@ -26,9 +53,8 @@ def include_object(object_, name, type_, reflected, compare_to):
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -40,10 +66,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        db_url,
         poolclass=pool.NullPool,
+        future=True,
     )
 
     with connectable.connect() as connection:

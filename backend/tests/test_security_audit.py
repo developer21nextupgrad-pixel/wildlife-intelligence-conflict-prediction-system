@@ -839,3 +839,124 @@ def test_find_similar_individuals_filters_species_family_in_sql_before_limit(db_
     )
     compiled = str(stmt.compile(dialect=postgresql.dialect())).lower()
     assert compiled.index("species_family") < compiled.index("order by") < compiled.index("limit")
+
+
+def test_database_url_normalization_and_production_alembic_guards(monkeypatch):
+    from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
+    from app.core.database import normalize_database_url
+
+    assert (
+        normalize_database_url("postgres://u:p%40ss@ep-demo.neon.tech/neondb?sslmode=require")
+        == "postgresql+psycopg://u:p%40ss@ep-demo.neon.tech/neondb?sslmode=require"
+    )
+    assert (
+        normalize_database_url("postgresql://u:p%23ss@ep-demo.neon.tech/neondb?sslmode=require")
+        == "postgresql+psycopg://u:p%23ss@ep-demo.neon.tech/neondb?sslmode=require"
+    )
+    assert (
+        normalize_database_url("postgresql+psycopg://u:p@ep-demo.neon.tech/neondb")
+        == "postgresql+psycopg://u:p@ep-demo.neon.tech/neondb"
+    )
+    assert normalize_database_url("sqlite:///./local.db") == "sqlite:///./local.db"
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+
+    # Production mode blocks missing, SQLite, or localhost DATABASE_URL
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    for bad_url in (
+        "",
+        "sqlite:///./accidental.db",
+        "postgresql+psycopg://wicps:pw@localhost:5432/wicps",
+        "postgresql://wicps:pw@127.0.0.1:5432/wicps",
+    ):
+        monkeypatch.setenv("DATABASE_URL", bad_url)
+        with pytest.raises(RuntimeError, match="Production migration error"):
+            alembic_command.upgrade(cfg, "0005_reid_and_wicps_integ:head", sql=True)
+
+    # Production mode accepts Neon postgresql:// URLs even with percent-encoded passwords
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://neondb_owner:p%40ss%23word@ep-prod-example.neon.tech/neondb?sslmode=require",
+    )
+    alembic_command.upgrade(cfg, "0005_reid_and_wicps_integ:head", sql=True)
+
+
+def test_alembic_0006_creates_users_table_preserves_data_and_supports_admin_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.orm import sessionmaker
+
+    from app.core.security import bootstrap_admin_from_env, verify_password
+
+    backend_dir = Path(__file__).resolve().parents[1]
+    db_file = tmp_path / "alembic_0006_verify.db"
+    db_url = f"sqlite:///{db_file}"
+
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    monkeypatch.setenv("DATABASE_URL", db_url)
+
+    cfg = AlembicConfig(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+
+    # Upgrade to 0005 first and seed an existing animal_identities row with a >64-char species label
+    alembic_command.upgrade(cfg, "0005_reid_and_wicps_integ")
+    long_species = "Rare Unclassified Mountain Herbivore Subspecies With An Extremely Long Taxonomic Descriptor Label"
+    eng = create_engine(db_url, future=True)
+    with eng.begin() as conn:
+        assert "users" not in set(inspect(conn).get_table_names())
+        conn.execute(
+            text(
+                "INSERT INTO animal_identities (id, animal_code, species, species_prefix, status, verification_status, total_sightings) "
+                "VALUES (:id, :code, :species, :prefix, 'active', 'provisional', 1)"
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "code": "UNK-001",
+                "species": long_species,
+                "prefix": "UNK",
+            },
+        )
+    eng.dispose()
+
+    # Now upgrade to head (0006_security_reid_idemp) and confirm users table + preserved data
+    alembic_command.upgrade(cfg, "head")
+    eng2 = create_engine(db_url, future=True)
+    insp = inspect(eng2)
+    assert "users" in set(insp.get_table_names())
+    user_indexes = {idx["name"] for idx in insp.get_indexes("users")}
+    assert {"ix_users_email", "ix_users_username", "ix_users_role_active"}.issubset(user_indexes)
+
+    with eng2.connect() as conn:
+        ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+        assert ver == "0006_security_reid_idemp"
+        fam = conn.execute(
+            text("SELECT species_family FROM animal_identities WHERE animal_code = 'UNK-001'")
+        ).scalar_one()
+        assert len(fam) <= 64
+        assert fam.startswith("rare_unclassified_mountain")
+
+    # Verify idempotent admin bootstrap works on migrated users table
+    SessionFactory = sessionmaker(bind=eng2, autoflush=False, autocommit=False)
+    settings = make_test_settings(
+        auth_bootstrap_admin_email="prod-admin@forest.gov.in",
+        auth_bootstrap_admin_password="VeryStrongAdminPassword!2026",
+        auth_bootstrap_admin_name="Chief Wildlife Warden",
+    )
+    with SessionFactory() as session:
+        first = bootstrap_admin_from_env(session, settings)
+        assert first is not None
+        assert first.role == "admin"
+        assert first.is_active is True
+        assert verify_password("VeryStrongAdminPassword!2026", first.password_hash)
+        second = bootstrap_admin_from_env(session, settings)
+        assert second is not None
+        assert second.id == first.id
+    eng2.dispose()
+

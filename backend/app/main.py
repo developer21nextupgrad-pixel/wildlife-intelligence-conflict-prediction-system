@@ -30,7 +30,13 @@ def create_application(custom_settings: Settings | None = None) -> FastAPI:
                 if settings.auto_seed_demo_data:
                     seed_demo_data(db)
         except Exception as exc:
-            logger.warning("Startup DB initialization skipped: %s", exc)
+            if settings.is_production:
+                logger.error(
+                    "Production startup DB initialization failed (%s). Verify Alembic migrations are up to date with 'alembic -c alembic.ini upgrade head'.",
+                    exc,
+                )
+            else:
+                logger.warning("Startup DB initialization skipped: %s", exc)
         if settings.speciesnet_preload_on_startup:
             try:
                 get_animal_detection_pipeline(settings).ensure_loaded()

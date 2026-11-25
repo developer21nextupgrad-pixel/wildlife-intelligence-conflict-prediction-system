@@ -30,7 +30,7 @@ CASE
     WHEN lower(coalesce(species, '')) LIKE '%sambar%' OR lower(coalesce(species, '')) LIKE '%rusa unicolor%' THEN 'sambar'
     WHEN lower(coalesce(species, '')) LIKE '%chital%' OR lower(coalesce(species, '')) LIKE '%axis axis%' OR lower(coalesce(species, '')) LIKE '%spotted deer%' THEN 'chital'
     WHEN trim(coalesce(species, '')) = '' OR lower(trim(species)) IN ('unknown', 'unknown / needs review', 'blank', 'animal') THEN 'unknown'
-    ELSE replace(lower(trim(species)), ' ', '_')
+    ELSE substr(replace(lower(trim(species)), ' ', '_'), 1, 64)
 END
 """
 

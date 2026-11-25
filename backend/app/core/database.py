@@ -12,9 +12,19 @@ class Base(DeclarativeBase):
     """Declarative base for all WICPS SQLAlchemy 2.x models."""
 
 
+def normalize_database_url(raw_url: str) -> str:
+    """Normalize standard PostgreSQL URLs to the installed psycopg v3 driver."""
+    url = (raw_url or "").strip()
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://") :]
+    return url
+
+
 def create_db_engine(database_url: str | None = None) -> Engine:
     settings = get_settings()
-    url = database_url or settings.database_url
+    url = normalize_database_url(database_url or settings.database_url)
 
     engine_kwargs: dict[str, Any] = {
         "pool_pre_ping": True,
