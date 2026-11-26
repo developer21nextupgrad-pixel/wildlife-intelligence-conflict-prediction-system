@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     rate_limit_window_seconds: int = 60
     auth_login_rate_limit_requests: int = 15
     auth_login_rate_limit_window_seconds: int = 60
+    auth_register_rate_limit_requests: int = 10
+    auth_register_rate_limit_window_seconds: int = 300
+    auth_password_reset_rate_limit_requests: int = 5
+    auth_password_reset_rate_limit_window_seconds: int = 300
     rate_limit_redis_url: str | None = None
 
     # Phase A Security: JWT / OIDC Authentication & RBAC
@@ -50,6 +54,18 @@ class Settings(BaseSettings):
     auth_bootstrap_admin_email: str | None = None
     auth_bootstrap_admin_password: str | None = None
     auth_bootstrap_admin_name: str = "Division Administrator"
+    auth_require_admin_approval: bool = False
+    password_reset_token_expire_minutes: int = 20
+
+    # Phase 2 Email / Gmail SMTP Password Recovery Configuration
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str | None = "developer21.nextupgrad@gmail.com"
+    smtp_password: str | None = None
+    smtp_from_email: str = "developer21.nextupgrad@gmail.com"
+    smtp_use_tls: bool = True
+    smtp_timeout_seconds: int = 15
+    frontend_base_url: str = "http://localhost:3000"
 
     auto_seed_demo_data: bool = False
     # Security safeguard: never expose sensitive animal telemetry GPS coordinates publicly.
@@ -111,6 +127,8 @@ class Settings(BaseSettings):
         "auth_bootstrap_admin_email",
         "auth_bootstrap_admin_password",
         "rate_limit_redis_url",
+        "smtp_username",
+        "smtp_password",
         mode="before",
     )
     @classmethod
@@ -126,6 +144,8 @@ class Settings(BaseSettings):
     def apply_defaults(self) -> "Settings":
         if self.s3_endpoint_url:
             self.s3_endpoint_url = self.s3_endpoint_url.rstrip("/") or None
+        if self.frontend_base_url:
+            self.frontend_base_url = self.frontend_base_url.strip().rstrip("/") or "http://localhost:3000"
         endpoint = (self.s3_endpoint_url or "").lower()
         is_tigris_or_r2 = any(
             domain in endpoint
@@ -143,18 +163,42 @@ class Settings(BaseSettings):
 
         return self
 
-    @field_validator("rate_limit_requests", "auth_login_rate_limit_requests")
+    @field_validator(
+        "rate_limit_requests",
+        "auth_login_rate_limit_requests",
+        "auth_register_rate_limit_requests",
+        "auth_password_reset_rate_limit_requests",
+    )
     @classmethod
     def validate_rate_limit_requests(cls, value: int) -> int:
         if value < 1:
             raise ValueError("rate_limit_requests must be >= 1")
         return value
 
-    @field_validator("rate_limit_window_seconds", "auth_login_rate_limit_window_seconds")
+    @field_validator(
+        "rate_limit_window_seconds",
+        "auth_login_rate_limit_window_seconds",
+        "auth_register_rate_limit_window_seconds",
+        "auth_password_reset_rate_limit_window_seconds",
+    )
     @classmethod
     def validate_rate_limit_window(cls, value: int) -> int:
         if value < 1:
             raise ValueError("rate_limit_window_seconds must be >= 1")
+        return value
+
+    @field_validator("password_reset_token_expire_minutes")
+    @classmethod
+    def validate_password_reset_expiry(cls, value: int) -> int:
+        if value < 15 or value > 30:
+            raise ValueError("password_reset_token_expire_minutes must be between 15 and 30 minutes")
+        return value
+
+    @field_validator("smtp_port")
+    @classmethod
+    def validate_smtp_port(cls, value: int) -> int:
+        if value < 1 or value > 65535:
+            raise ValueError("smtp_port must be between 1 and 65535")
         return value
 
     @field_validator("default_extract_fps")

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import logging
+import re
+import secrets
 from typing import Literal
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -23,14 +26,71 @@ from app.core.security import (
     require_roles,
     verify_password,
 )
-from app.models.user import UserAccount
+from app.models.user import PasswordResetToken, UserAccount
 from app.schemas.common import NonEmptyStr
+from app.services.email_service import (
+    SmtpEmailService,
+    build_password_reset_url,
+    get_email_service,
+)
 
 logger = logging.getLogger("wicps.auth")
 
 router = APIRouter(prefix="/auth", tags=["Authentication & RBAC"])
 
 RoleLiteral = Literal["operator", "reviewer", "admin"]
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_USERNAME_SANITIZE_RE = re.compile(r"[^a-z0-9._-]+")
+
+
+def _validate_email_format(raw_email: str) -> str:
+    email = (raw_email or "").strip().lower()
+    if len(email) > 255 or not _EMAIL_RE.match(email):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Please enter a valid email address.",
+        )
+    return email
+
+
+def _validate_password_strength(password: str) -> None:
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must be at least 8 characters long.",
+        )
+    if len(password) > 256:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Password must not exceed 256 characters.",
+        )
+
+
+def _hash_reset_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _normalize_utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _get_email_service_dep(settings: Settings = Depends(get_settings)) -> SmtpEmailService:
+    return get_email_service(settings)
+
+
+def _generate_unique_username(db: Session, email: str) -> str:
+    local_part = email.split("@", 1)[0].lower()
+    base = _USERNAME_SANITIZE_RE.sub("", local_part)[:64] or "user"
+    candidate = base
+    for _ in range(10):
+        conflict = db.execute(
+            select(UserAccount.id).where(func.lower(UserAccount.username) == candidate.lower())
+        ).scalar_one_or_none()
+        if conflict is None:
+            return candidate
+        candidate = f"{base[:56]}-{secrets.token_hex(3)}"
+    return f"user-{uuid.uuid4().hex[:12]}"
 
 
 class AuthenticatedUserProfile(BaseModel):
@@ -63,6 +123,68 @@ class BootstrapAdminRequest(BaseModel):
     email: NonEmptyStr = Field(..., max_length=255)
     display_name: NonEmptyStr = Field(..., max_length=160)
     password: str = Field(..., min_length=8, max_length=256)
+
+
+class RegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: NonEmptyStr = Field(..., min_length=2, max_length=160)
+    email: NonEmptyStr = Field(..., max_length=255)
+    password: str = Field(..., min_length=8, max_length=256)
+    confirm_password: str = Field(..., min_length=8, max_length=256)
+
+    @model_validator(mode="after")
+    def verify_passwords_match(self) -> "RegisterRequest":
+        if self.password != self.confirm_password:
+            raise ValueError("Password and confirm password do not match.")
+        return self
+
+
+class RegisterResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    username: str
+    display_name: str
+    role: str
+    is_active: bool
+    requires_approval: bool
+    message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: NonEmptyStr = Field(..., max_length=255)
+
+
+class ForgotPasswordResponse(BaseModel):
+    status: str = "accepted"
+    message: str
+
+
+class ValidateResetTokenRequest(BaseModel):
+    token: NonEmptyStr = Field(..., min_length=16, max_length=512)
+
+
+class ValidateResetTokenResponse(BaseModel):
+    valid: bool
+    expires_at: datetime | None = None
+    detail: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: NonEmptyStr = Field(..., min_length=16, max_length=512)
+    new_password: str = Field(..., min_length=8, max_length=256)
+    confirm_password: str = Field(..., min_length=8, max_length=256)
+
+    @model_validator(mode="after")
+    def verify_passwords_match(self) -> "ResetPasswordRequest":
+        if self.new_password != self.confirm_password:
+            raise ValueError("New password and confirm password do not match.")
+        return self
+
+
+class ResetPasswordResponse(BaseModel):
+    status: str = "ok"
+    message: str
 
 
 class LoginResponse(BaseModel):
@@ -242,7 +364,7 @@ def login_with_credentials(
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is deactivated. Contact your division administrator.",
+            detail="User account is deactivated or awaiting administrator approval. Contact your division administrator.",
         )
 
     user.last_login_at = datetime.now(timezone.utc)
@@ -272,6 +394,261 @@ def login_with_credentials(
             effective_roles=sorted(expand_effective_roles([user.role])),
             auth_method="jwt_hs256",
         ),
+    )
+
+
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_account(
+    payload: RegisterRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> RegisterResponse:
+    """Public self-registration endpoint. Always assigns least-privilege 'operator' role (never admin)."""
+    if not settings.auth_jwt_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Local account registration is disabled when OIDC-only authentication is enforced.",
+        )
+
+    email = _validate_email_format(payload.email)
+    _validate_password_strength(payload.password)
+
+    existing = db.execute(
+        select(UserAccount.id).where(func.lower(UserAccount.email) == email)
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email address is already registered.",
+        )
+
+    username = _generate_unique_username(db, email)
+    requires_approval = bool(settings.auth_require_admin_approval)
+
+    # Security invariant: public registration strictly assigns the lowest-privilege 'operator' role.
+    account = UserAccount(
+        email=email,
+        username=username,
+        display_name=payload.full_name.strip(),
+        role="operator",
+        password_hash=hash_password(payload.password),
+        is_active=not requires_approval,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+
+    logger.info(
+        "Registered new operator account user_id=%s requires_approval=%s",
+        account.id,
+        requires_approval,
+    )
+    message = (
+        "Account created successfully and is pending administrator approval before sign-in."
+        if requires_approval
+        else "Account created successfully with Operator access. You can now sign in."
+    )
+    return RegisterResponse(
+        id=account.id,
+        email=account.email,
+        username=account.username,
+        display_name=account.display_name,
+        role=account.role,
+        is_active=account.is_active,
+        requires_approval=requires_approval,
+        message=message,
+    )
+
+
+_GENERIC_FORGOT_PASSWORD_MESSAGE = (
+    "If an active account is registered with that email address, a password reset link has been sent."
+)
+
+
+@router.post("/forgot-password", response_model=ForgotPasswordResponse)
+def request_password_reset(
+    payload: ForgotPasswordRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    email_service: SmtpEmailService = Depends(_get_email_service_dep),
+) -> ForgotPasswordResponse:
+    """Generates a single-use hashed reset token and sends a recovery email without leaking account existence."""
+    email = _validate_email_format(payload.email)
+    user = db.execute(
+        select(UserAccount).where(func.lower(UserAccount.email) == email)
+    ).scalar_one_or_none()
+
+    if user is None or not user.is_active:
+        return ForgotPasswordResponse(
+            status="accepted",
+            message=_GENERIC_FORGOT_PASSWORD_MESSAGE,
+        )
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=settings.password_reset_token_expire_minutes)
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = _hash_reset_token(raw_token)
+
+    forwarded_for = request.headers.get("x-forwarded-for")
+    client_ip = (
+        forwarded_for.split(",")[0].strip()
+        if forwarded_for
+        else (request.client.host if request.client else None)
+    )
+
+    try:
+        # Invalidate any prior unused reset tokens for this user
+        db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at.is_(None),
+            )
+            .values(used_at=now)
+        )
+        token_record = PasswordResetToken(
+            user_id=user.id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            requested_ip=(client_ip or "")[:64] or None,
+        )
+        db.add(token_record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to persist password reset token for user_id=%s", user.id)
+        return ForgotPasswordResponse(
+            status="accepted",
+            message=_GENERIC_FORGOT_PASSWORD_MESSAGE,
+        )
+
+    reset_url = build_password_reset_url(settings.frontend_base_url, raw_token)
+    email_service.send_password_reset_email(
+        to_email=user.email,
+        display_name=user.display_name,
+        reset_url=reset_url,
+        expire_minutes=settings.password_reset_token_expire_minutes,
+    )
+
+    return ForgotPasswordResponse(
+        status="accepted",
+        message=_GENERIC_FORGOT_PASSWORD_MESSAGE,
+    )
+
+
+@router.post("/reset-password/validate", response_model=ValidateResetTokenResponse)
+def validate_password_reset_token(
+    payload: ValidateResetTokenRequest,
+    db: Session = Depends(get_db),
+) -> ValidateResetTokenResponse:
+    """Checks whether a password reset token is valid, unused, and unexpired."""
+    token_hash = _hash_reset_token(payload.token.strip())
+    token_record = db.execute(
+        select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+    ).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if (
+        token_record is None
+        or token_record.used_at is not None
+        or _normalize_utc(token_record.expires_at) <= now
+    ):
+        return ValidateResetTokenResponse(
+            valid=False,
+            detail="This password reset link is invalid, expired, or has already been used.",
+        )
+
+    user = db.get(UserAccount, token_record.user_id)
+    if user is None or not user.is_active:
+        return ValidateResetTokenResponse(
+            valid=False,
+            detail="This password reset link is no longer valid.",
+        )
+
+    return ValidateResetTokenResponse(
+        valid=True,
+        expires_at=_normalize_utc(token_record.expires_at),
+    )
+
+
+@router.post("/reset-password", response_model=ResetPasswordResponse)
+def reset_password_with_token(
+    payload: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+) -> ResetPasswordResponse:
+    """Validates a single-use reset token, updates the user's password hash, and invalidates the token."""
+    _validate_password_strength(payload.new_password)
+
+    token_hash = _hash_reset_token(payload.token.strip())
+    token_record = db.execute(
+        select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash)
+    ).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if (
+        token_record is None
+        or token_record.used_at is not None
+        or _normalize_utc(token_record.expires_at) <= now
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This password reset link is invalid, expired, or has already been used.",
+        )
+
+    user = db.get(UserAccount, token_record.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This password reset link is no longer valid.",
+        )
+
+    try:
+        # Atomically claim the single-use token to prevent concurrent replay
+        claim_res = db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.id == token_record.id,
+                PasswordResetToken.used_at.is_(None),
+            )
+            .values(used_at=now)
+        )
+        if claim_res.rowcount != 1:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This password reset link has already been used.",
+            )
+
+        user.password_hash = hash_password(payload.new_password)
+        # Invalidate any other outstanding reset tokens for this user
+        db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at.is_(None),
+            )
+            .values(used_at=now)
+        )
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception("Password reset transaction failed for user_id=%s", user.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to update password right now. Please try again.",
+        )
+
+    logger.info("Password updated via reset token for user_id=%s", user.id)
+    return ResetPasswordResponse(
+        status="ok",
+        message="Your password has been reset successfully. You can now sign in with your new password.",
     )
 
 

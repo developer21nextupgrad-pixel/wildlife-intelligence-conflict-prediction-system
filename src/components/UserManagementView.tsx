@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   CheckCircle2,
 } from 'lucide-react';
+import { PasswordInput } from './PasswordInput';
 
 interface UserManagementViewProps {
   currentUser?: AuthenticatedUserProfile | null;
@@ -248,15 +249,16 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                 <label htmlFor="rbac-password" className="block text-[11px] font-mono text-slate-400 mb-1">
                   Initial Password
                 </label>
-                <input
+                <PasswordInput
                   id="rbac-password"
-                  type="password"
+                  value={newPassword}
+                  onChange={setNewPassword}
                   required
                   minLength={8}
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  showLeadingIcon={false}
                   placeholder="Min 8 chars"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100"
+                  toggleAriaLabelSubject="initial account password"
+                  inputClassName="w-full bg-slate-900 border border-slate-700 rounded-lg pl-2.5 pr-9 py-1.5 text-slate-100 focus:outline-hidden focus:border-emerald-500"
                 />
               </div>
             </div>

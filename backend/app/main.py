@@ -97,6 +97,22 @@ def create_application(custom_settings: Settings | None = None) -> FastAPI:
             settings.auth_login_rate_limit_requests,
             settings.auth_login_rate_limit_window_seconds,
         ),
+        f"{settings.api_v1_prefix}/auth/register": (
+            settings.auth_register_rate_limit_requests,
+            settings.auth_register_rate_limit_window_seconds,
+        ),
+        f"{settings.api_v1_prefix}/auth/forgot-password": (
+            settings.auth_password_reset_rate_limit_requests,
+            settings.auth_password_reset_rate_limit_window_seconds,
+        ),
+        f"{settings.api_v1_prefix}/auth/reset-password": (
+            settings.auth_password_reset_rate_limit_requests,
+            settings.auth_password_reset_rate_limit_window_seconds,
+        ),
+        f"{settings.api_v1_prefix}/auth/reset-password/validate": (
+            settings.auth_password_reset_rate_limit_requests * 2,
+            settings.auth_password_reset_rate_limit_window_seconds,
+        ),
     }
     application.add_middleware(
         RateLimitMiddleware,

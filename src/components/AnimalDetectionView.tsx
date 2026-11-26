@@ -26,6 +26,8 @@ import {
   AlertTriangle,
   BellRing,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   EyeOff,
   FileImage,
@@ -40,6 +42,7 @@ import {
   Search,
   ShieldAlert,
   Sparkles,
+  Trash2,
   Upload,
   UserCheck,
   X,
@@ -174,8 +177,19 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
 
   const [history, setHistory] = useState<AnimalDetectionRecord[]>([]);
   const [totalRecords, setTotalRecords] = useState<number>(0);
+  const [eligibleClearCount, setEligibleClearCount] = useState<number>(0);
+  const [historyPage, setHistoryPage] = useState<number>(1);
+  const [historyTotalPages, setHistoryTotalPages] = useState<number>(1);
+  const HISTORY_PAGE_SIZE = 10;
   const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
+
+  // History deletion / clear-all confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<AnimalDetectionRecord | null>(null);
+  const [isDeletingSingle, setIsDeletingSingle] = useState<boolean>(false);
+  const [isClearAllModalOpen, setIsClearAllModalOpen] = useState<boolean>(false);
+  const [isClearingAll, setIsClearingAll] = useState<boolean>(false);
 
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
@@ -214,18 +228,39 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
   }, []);
 
   const fetchDetections = useCallback(
-    async (selectNewestIfEmpty = false) => {
+    async (selectNewestIfEmpty = false, targetPage?: number) => {
+      const requestedPage = targetPage ?? historyPage;
       setIsLoadingHistory(true);
       setHistoryError(null);
       try {
         const res = await apiBridge.getAnimalDetections({
-          page: 1,
-          pageSize: 50,
+          page: requestedPage,
+          pageSize: HISTORY_PAGE_SIZE,
           processingStatus: statusFilter,
           search: searchQuery,
         });
+        if (res.items.length === 0 && requestedPage > 1 && res.total > 0) {
+          const fallbackPage = Math.max(1, res.totalPages);
+          setHistoryPage(fallbackPage);
+          const retryRes = await apiBridge.getAnimalDetections({
+            page: fallbackPage,
+            pageSize: HISTORY_PAGE_SIZE,
+            processingStatus: statusFilter,
+            search: searchQuery,
+          });
+          setHistory(retryRes.items);
+          setTotalRecords(retryRes.total);
+          setHistoryTotalPages(Math.max(1, retryRes.totalPages));
+          setEligibleClearCount(retryRes.eligibleClearCount);
+          if (selectNewestIfEmpty && retryRes.items.length > 0) {
+            setActiveRecord((prev) => prev ?? retryRes.items[0]);
+          }
+          return;
+        }
         setHistory(res.items);
         setTotalRecords(res.total);
+        setHistoryTotalPages(Math.max(1, res.totalPages));
+        setEligibleClearCount(res.eligibleClearCount);
         if (selectNewestIfEmpty && res.items.length > 0) {
           setActiveRecord((prev) => prev ?? res.items[0]);
         }
@@ -237,12 +272,83 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
         setIsLoadingHistory(false);
       }
     },
-    [searchQuery, statusFilter]
+    [historyPage, searchQuery, statusFilter]
   );
 
   useEffect(() => {
     fetchDetections(true);
   }, [fetchDetections]);
+
+  const handleConfirmSingleDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeletingSingle(true);
+    setHistoryError(null);
+    setHistoryNotice(null);
+    try {
+      const res = await apiBridge.deleteAnimalDetection(
+        deleteTarget.id,
+        'Removed from Previous Detection Results by authorized user'
+      );
+      const removedId = deleteTarget.id;
+      const removedLabel = deleteTarget.primarySpecies || deleteTarget.sourceFilename;
+      setDeleteTarget(null);
+      if (activeRecord?.id === removedId) {
+        setActiveRecord(null);
+      }
+      setHistoryNotice(
+        res.storagePreservedReason
+          ? `Removed "${removedLabel}" from detection history (linked wildlife evidence preserved).`
+          : `Removed "${removedLabel}" from detection history.`
+      );
+      await fetchDetections(false);
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error ? err.message : 'Failed to remove detection record.'
+      );
+    } finally {
+      setIsDeletingSingle(false);
+    }
+  };
+
+  const handleConfirmClearAll = async () => {
+    setIsClearingAll(true);
+    setHistoryError(null);
+    setHistoryNotice(null);
+    try {
+      const res = await apiBridge.clearAnimalDetectionHistory({
+        processingStatus: statusFilter,
+        search: searchQuery,
+        reason: 'Bulk cleared Previous Detection Results by authorized user',
+      });
+      setIsClearAllModalOpen(false);
+      setActiveRecord(null);
+      setHistoryPage(1);
+      if (res.clearedCount === 0) {
+        setHistoryNotice('No eligible detection records were available to clear.');
+      } else {
+        const preservedNote =
+          res.storageObjectsPreserved > 0
+            ? ` Linked sightings, alerts, and Re-ID evidence (${res.storageObjectsPreserved} asset${
+                res.storageObjectsPreserved === 1 ? '' : 's'
+              }) were preserved.`
+            : '';
+        const skippedNote =
+          res.skippedUnauthorizedCount > 0
+            ? ` ${res.skippedUnauthorizedCount} record(s) owned by other operators were left untouched.`
+            : '';
+        setHistoryNotice(
+          `Cleared ${res.clearedCount} detection record${res.clearedCount === 1 ? '' : 's'} from history.${preservedNote}${skippedNote}`
+        );
+      }
+      await fetchDetections(false, 1);
+    } catch (err) {
+      setHistoryError(
+        err instanceof Error ? err.message : 'Failed to clear detection history.'
+      );
+    } finally {
+      setIsClearingAll(false);
+    }
+  };
 
   // Revoke object URL on change/unmount
   useEffect(() => {
@@ -385,11 +491,8 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
         );
       }
 
-      const alreadyExists = history.some((item) => item.id === result.id);
-      setHistory((prev) => [result, ...prev.filter((item) => item.id !== result.id)]);
-      if (!alreadyExists) {
-        setTotalRecords((prev) => prev + 1);
-      }
+      setHistoryPage(1);
+      await fetchDetections(false, 1);
       if (result.generatedSightingId || (result.generatedAlerts?.length ?? 0) > 0) {
         await onDataIntegrated?.();
       }
@@ -851,11 +954,31 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
 
           {/* Persisted Previous Detections History */}
           <section className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-bold text-white">Previous Detection Results</h2>
-              <span className="text-[11px] font-mono text-slate-400">
-                {history.length} shown
-              </span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-sm font-bold text-white">Previous Detection Results</h2>
+                <span className="text-[11px] font-mono text-slate-400">
+                  {totalRecords} total
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setHistoryError(null);
+                  setIsClearAllModalOpen(true);
+                }}
+                disabled={isLoadingHistory || isClearingAll || eligibleClearCount === 0}
+                data-testid="clear-all-detections-button"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-950 hover:border-red-500/70 hover:bg-red-950/50 hover:text-red-200 disabled:opacity-40 disabled:pointer-events-none text-[11px] font-semibold text-slate-300 transition"
+                title={
+                  eligibleClearCount > 0
+                    ? `Clear ${eligibleClearCount} eligible detection record(s)`
+                    : 'No eligible detection records to clear'
+                }
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear All{eligibleClearCount > 0 ? ` (${eligibleClearCount})` : ''}</span>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -864,7 +987,10 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setHistoryPage(1);
+                    setSearchQuery(e.target.value);
+                  }}
                   placeholder="Search filename or species..."
                   aria-label="Search previous detections"
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-emerald-500"
@@ -873,7 +999,10 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
 
               <select
                 value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
+                onChange={(e) => {
+                  setHistoryPage(1);
+                  setStatusFilter(e.target.value);
+                }}
                 aria-label="Filter detection status"
                 className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
               >
@@ -887,9 +1016,40 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
             {historyError && (
               <div
                 role="alert"
-                className="bg-red-950/60 border border-red-800 text-red-200 rounded-xl p-3 text-xs"
+                className="bg-red-950/60 border border-red-800 text-red-200 rounded-xl p-3 text-xs flex items-start justify-between gap-2"
               >
-                {historyError}
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{historyError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHistoryError(null)}
+                  aria-label="Dismiss history error"
+                  className="text-red-300 hover:text-white shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {historyNotice && !historyError && (
+              <div
+                role="status"
+                className="bg-emerald-950/50 border border-emerald-800/70 text-emerald-200 rounded-xl p-3 text-xs flex items-start justify-between gap-2"
+              >
+                <div className="flex items-start gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <span>{historyNotice}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setHistoryNotice(null)}
+                  aria-label="Dismiss history notice"
+                  className="text-emerald-300 hover:text-white shrink-0"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
             )}
 
@@ -900,71 +1060,130 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
               </div>
             ) : history.length === 0 ? (
               <div className="py-10 text-center text-xs text-slate-400 bg-slate-950/50 rounded-xl border border-slate-800/80 px-4">
-                No animal detections recorded yet. Upload a JPG or PNG image above to begin.
+                {searchQuery.trim() || statusFilter !== 'All'
+                  ? 'No detection records match the current search or status filter.'
+                  : 'No animal detections recorded yet. Upload a JPG or PNG image above to begin.'}
               </div>
             ) : (
-              <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1" data-testid="detection-history-list">
-                {history.map((item) => {
-                  const isSelected = !showingLocalDraftPreview && activeRecord?.id === item.id;
-                  const badge = getStatusBadgeProps(item.processingStatus);
-                  const primaryCode = item.detections.find((d) => d.animalCode)?.animalCode;
-                  const alertCount = item.generatedAlerts?.length ?? item.generatedAlertIds?.length ?? 0;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => handleSelectHistoryRecord(item)}
-                      aria-label={`Inspect detection ${item.sourceFilename} (${
-                        item.primarySpecies || badge.label
-                      })`}
-                      className={`w-full text-left p-2.5 rounded-xl border transition flex items-center gap-3 ${
-                        isSelected
-                          ? 'bg-emerald-950/40 border-emerald-500/70'
-                          : 'bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
-                      }`}
-                    >
-                      <AuthImage
-                        src={item.imageUrl}
-                        alt={item.sourceFilename}
-                        className="w-14 h-14 rounded-lg object-cover bg-slate-900 border border-slate-800 shrink-0"
-                        loading="lazy"
-                      />
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-bold text-white truncate">
-                            {item.primarySpecies || badge.label}
-                            {primaryCode ? (
-                              <span className="ml-1.5 font-mono text-sky-300">[{primaryCode}]</span>
-                            ) : null}
-                          </span>
-                          {item.primaryConfidence !== null &&
-                            item.primaryConfidence !== undefined && (
-                              <span className="text-[11px] font-mono text-emerald-300 shrink-0">
-                                {(item.primaryConfidence * 100).toFixed(1)}%
+              <>
+                <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1" data-testid="detection-history-list">
+                  {history.map((item) => {
+                    const isSelected = !showingLocalDraftPreview && activeRecord?.id === item.id;
+                    const badge = getStatusBadgeProps(item.processingStatus);
+                    const primaryCode = item.detections.find((d) => d.animalCode)?.animalCode;
+                    const alertCount = item.generatedAlerts?.length ?? item.generatedAlertIds?.length ?? 0;
+                    const canRemove = Boolean(item.canDelete);
+                    return (
+                      <div
+                        key={item.id}
+                        data-testid={`detection-history-card-${item.id}`}
+                        className={`w-full rounded-xl border transition flex items-center gap-1.5 pr-2 ${
+                          isSelected
+                            ? 'bg-emerald-950/40 border-emerald-500/70'
+                            : 'bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSelectHistoryRecord(item)}
+                          aria-label={`Inspect detection ${item.sourceFilename} (${
+                            item.primarySpecies || badge.label
+                          })`}
+                          className="flex-1 min-w-0 text-left p-2.5 flex items-center gap-3 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 rounded-l-xl"
+                        >
+                          <AuthImage
+                            src={item.imageUrl}
+                            alt={item.sourceFilename}
+                            className="w-14 h-14 rounded-lg object-cover bg-slate-900 border border-slate-800 shrink-0"
+                            loading="lazy"
+                          />
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-xs font-bold text-white truncate">
+                                {item.primarySpecies || badge.label}
+                                {primaryCode ? (
+                                  <span className="ml-1.5 font-mono text-sky-300">[{primaryCode}]</span>
+                                ) : null}
                               </span>
-                            )}
-                        </div>
-                        <div className="text-[11px] text-slate-400 truncate">
-                          {item.sourceFilename}
-                        </div>
-                        <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-400">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`px-1.5 py-0.5 rounded border ${badge.classes}`}>
-                              {item.animalCount} {item.animalCount === 1 ? 'animal' : 'animals'}
-                            </span>
-                            {alertCount > 0 && (
-                              <span className="px-1.5 py-0.5 rounded border border-red-700 bg-red-950 text-red-300">
-                                {alertCount} Alert{alertCount > 1 ? 's' : ''}
-                              </span>
-                            )}
+                              {item.primaryConfidence !== null &&
+                                item.primaryConfidence !== undefined && (
+                                  <span className="text-[11px] font-mono text-emerald-300 shrink-0">
+                                    {(item.primaryConfidence * 100).toFixed(1)}%
+                                  </span>
+                                )}
+                            </div>
+                            <div className="text-[11px] text-slate-400 truncate">
+                              {item.sourceFilename}
+                            </div>
+                            <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-slate-400">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`px-1.5 py-0.5 rounded border ${badge.classes}`}>
+                                  {item.animalCount} {item.animalCount === 1 ? 'animal' : 'animals'}
+                                </span>
+                                {alertCount > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded border border-red-700 bg-red-950 text-red-300">
+                                    {alertCount} Alert{alertCount > 1 ? 's' : ''}
+                                  </span>
+                                )}
+                              </div>
+                              <span>{formatTimestamp(item.createdAt)}</span>
+                            </div>
                           </div>
-                          <span>{formatTimestamp(item.createdAt)}</span>
-                        </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setHistoryError(null);
+                            setDeleteTarget(item);
+                          }}
+                          disabled={!canRemove || isDeletingSingle || isClearingAll}
+                          aria-label={`Delete detection ${item.sourceFilename}`}
+                          title={
+                            canRemove
+                              ? `Remove ${item.sourceFilename} from detection history`
+                              : 'Only the uploader, a reviewer, or an administrator can remove this record'
+                          }
+                          data-testid={`delete-detection-${item.id}`}
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-300 hover:bg-red-950/60 border border-transparent hover:border-red-800/60 disabled:opacity-30 disabled:pointer-events-none transition shrink-0"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
+                    );
+                  })}
+                </div>
+
+                {/* Pagination Controls */}
+                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
+                  <span>
+                    Page {historyPage} of {historyTotalPages} • Showing {history.length} of {totalRecords}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                      disabled={historyPage <= 1 || isLoadingHistory}
+                      aria-label="Previous detection history page"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40 disabled:pointer-events-none transition"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                      <span>Prev</span>
                     </button>
-                  );
-                })}
-              </div>
+                    <button
+                      type="button"
+                      onClick={() => setHistoryPage((p) => Math.min(historyTotalPages, p + 1))}
+                      disabled={historyPage >= historyTotalPages || isLoadingHistory}
+                      aria-label="Next detection history page"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40 disabled:pointer-events-none transition"
+                    >
+                      <span>Next</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </>
             )}
           </section>
         </div>
@@ -1405,6 +1624,191 @@ export const AnimalDetectionView: React.FC<AnimalDetectionViewProps> = ({
         </section>
       </div>
         </>
+      )}
+
+      {/* Single Detection Delete Confirmation Dialog */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-detection-modal-title"
+          data-testid="delete-detection-modal"
+        >
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-slate-800 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-red-950/80 border border-red-800/70 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-4 h-4 text-red-400" />
+                </div>
+                <div>
+                  <h3 id="delete-detection-modal-title" className="text-sm font-bold text-white">
+                    Remove Detection Record?
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    This archives the selected entry from Previous Detection Results.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isDeletingSingle && setDeleteTarget(null)}
+                disabled={isDeletingSingle}
+                aria-label="Close delete confirmation"
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3 text-xs">
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Detected Species</span>
+                  <span className="font-bold text-white">
+                    {deleteTarget.primarySpecies || getStatusBadgeProps(deleteTarget.processingStatus).label}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Source File</span>
+                  <span className="font-mono text-slate-200 truncate max-w-[220px]">
+                    {deleteTarget.sourceFilename}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-400">Recorded At</span>
+                  <span className="font-mono text-slate-300">
+                    {formatTimestamp(deleteTarget.createdAt)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="bg-emerald-950/30 border border-emerald-800/50 rounded-xl p-3 text-emerald-200/90 leading-relaxed">
+                Any linked wildlife sightings, conflict alerts, incidents, and Re-ID profiles remain
+                preserved in the database for audit and conservation integrity.
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-950/60 border-t border-slate-800 flex items-center justify-end gap-2.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={isDeletingSingle}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSingleDelete}
+                disabled={isDeletingSingle}
+                data-testid="confirm-delete-detection-button"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-bold transition"
+              >
+                {isDeletingSingle ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Removing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Remove Record</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear All Detection History Confirmation Dialog */}
+      {isClearAllModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="clear-all-detections-modal-title"
+          data-testid="clear-all-detections-modal"
+        >
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-slate-800 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-red-950/80 border border-red-800/70 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                </div>
+                <div>
+                  <h3 id="clear-all-detections-modal-title" className="text-sm font-bold text-white">
+                    Clear Detection History?
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Review the scope before archiving records from Previous Detection Results.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isClearingAll && setIsClearAllModalOpen(false)}
+                disabled={isClearingAll}
+                aria-label="Close clear all confirmation"
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-3 text-xs">
+              <div className="bg-red-950/40 border border-red-800/60 rounded-xl p-3.5 text-red-100 leading-relaxed">
+                This action will remove{' '}
+                <strong className="font-mono text-white" data-testid="clear-all-affected-count">
+                  {eligibleClearCount}
+                </strong>{' '}
+                eligible detection record{eligibleClearCount === 1 ? '' : 's'} from your visible
+                history
+                {searchQuery.trim() || statusFilter !== 'All'
+                  ? ' matching your active search/status filters'
+                  : ''}
+                .
+              </div>
+
+              <div className="bg-emerald-950/30 border border-emerald-800/50 rounded-xl p-3 text-emerald-200/90 leading-relaxed">
+                Records are soft-archived with an audit trail. Linked wildlife sightings, conflict
+                alerts, incidents, and Re-ID evidence remain intact and will not be deleted.
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 bg-slate-950/60 border-t border-slate-800 flex items-center justify-end gap-2.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setIsClearAllModalOpen(false)}
+                disabled={isClearingAll}
+                data-testid="cancel-clear-all-button"
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmClearAll}
+                disabled={isClearingAll || eligibleClearCount === 0}
+                data-testid="confirm-clear-all-button"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white font-bold transition"
+              >
+                {isClearingAll ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Clearing History...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Clear {eligibleClearCount} Record{eligibleClearCount === 1 ? '' : 's'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

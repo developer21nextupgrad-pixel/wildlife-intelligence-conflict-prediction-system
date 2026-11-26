@@ -289,6 +289,9 @@ async function apiRequest<T>(
       response.status === 401 &&
       !hasCameraKey &&
       !normalizedPath.startsWith('/auth/login') &&
+      !normalizedPath.startsWith('/auth/register') &&
+      !normalizedPath.startsWith('/auth/forgot-password') &&
+      !normalizedPath.startsWith('/auth/reset-password') &&
       !normalizedPath.startsWith('/auth/bootstrap-admin') &&
       !normalizedPath.startsWith('/auth/status')
     ) {
@@ -349,6 +352,55 @@ interface ApiUserAccountDto {
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface ApiRegisterResponseDto {
+  id: string;
+  email: string;
+  username: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  requires_approval: boolean;
+  message: string;
+}
+
+interface ApiForgotPasswordResponseDto {
+  status: string;
+  message: string;
+}
+
+interface ApiValidateResetTokenResponseDto {
+  valid: boolean;
+  expires_at?: string | null;
+  detail?: string | null;
+}
+
+interface ApiResetPasswordResponseDto {
+  status: string;
+  message: string;
+}
+
+interface ApiAnimalDetectionListDto extends PaginatedApiResponse<ApiAnimalDetectionDto> {
+  eligible_clear_count?: number;
+}
+
+interface ApiAnimalDetectionDeleteDto {
+  status: string;
+  id: string;
+  source_filename: string;
+  deleted_at: string;
+  deleted_by: string;
+  storage_cleaned: boolean;
+  storage_preserved_reason?: string | null;
+}
+
+interface ApiAnimalDetectionClearDto {
+  status: string;
+  cleared_count: number;
+  skipped_unauthorized_count: number;
+  storage_objects_cleaned: number;
+  storage_objects_preserved: number;
 }
 
 function mapUserProfileFromApi(dto: ApiAuthenticatedProfileDto): AuthenticatedUserProfile {
@@ -431,6 +483,82 @@ export const apiBridge = {
     const profile = mapUserProfileFromApi(res.user);
     setStoredAuthSession(res.access_token, profile);
     return profile;
+  },
+
+  async registerAccount(input: {
+    fullName: string;
+    email: string;
+    password: string;
+    confirmPassword: string;
+  }): Promise<{
+    id: string;
+    email: string;
+    username: string;
+    displayName: string;
+    role: WicpsRole;
+    isActive: boolean;
+    requiresApproval: boolean;
+    message: string;
+  }> {
+    const res = await apiRequest<ApiRegisterResponseDto>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        full_name: input.fullName.trim(),
+        email: input.email.trim(),
+        password: input.password,
+        confirm_password: input.confirmPassword,
+      }),
+    });
+    return {
+      id: res.id,
+      email: res.email,
+      username: res.username,
+      displayName: res.display_name,
+      role: normalizeWicpsRole(res.role),
+      isActive: Boolean(res.is_active),
+      requiresApproval: Boolean(res.requires_approval),
+      message: res.message,
+    };
+  },
+
+  async requestPasswordReset(email: string): Promise<{ status: string; message: string }> {
+    const res = await apiRequest<ApiForgotPasswordResponseDto>('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.trim() }),
+    });
+    return { status: res.status, message: res.message };
+  },
+
+  async validatePasswordResetToken(token: string): Promise<{
+    valid: boolean;
+    expiresAt: string | null;
+    detail: string | null;
+  }> {
+    const res = await apiRequest<ApiValidateResetTokenResponseDto>('/auth/reset-password/validate', {
+      method: 'POST',
+      body: JSON.stringify({ token: token.trim() }),
+    });
+    return {
+      valid: Boolean(res.valid),
+      expiresAt: res.expires_at ?? null,
+      detail: res.detail ?? null,
+    };
+  },
+
+  async resetPassword(input: {
+    token: string;
+    newPassword: string;
+    confirmPassword: string;
+  }): Promise<{ status: string; message: string }> {
+    const res = await apiRequest<ApiResetPasswordResponseDto>('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({
+        token: input.token.trim(),
+        new_password: input.newPassword,
+        confirm_password: input.confirmPassword,
+      }),
+    });
+    return { status: res.status, message: res.message };
   },
 
   async getCurrentUser(): Promise<AuthenticatedUserProfile> {
@@ -911,6 +1039,7 @@ export const apiBridge = {
     page: number;
     pageSize: number;
     totalPages: number;
+    eligibleClearCount: number;
   }> {
     const baseUrl = getConfiguredApiBaseUrl();
     const qs = new URLSearchParams();
@@ -922,7 +1051,7 @@ export const apiBridge = {
     if (params.search && params.search.trim()) {
       qs.set('search', params.search.trim());
     }
-    const res = await apiRequest<PaginatedApiResponse<ApiAnimalDetectionDto>>(
+    const res = await apiRequest<ApiAnimalDetectionListDto>(
       `/detections?${qs.toString()}`
     );
     return {
@@ -933,6 +1062,7 @@ export const apiBridge = {
       page: res.page,
       pageSize: res.page_size,
       totalPages: res.total_pages,
+      eligibleClearCount: res.eligible_clear_count ?? res.total,
     };
   },
 
@@ -940,6 +1070,72 @@ export const apiBridge = {
     const baseUrl = getConfiguredApiBaseUrl();
     const dto = await apiRequest<ApiAnimalDetectionDto>(`/detections/${detectionId}`);
     return mapAnimalDetectionFromApi(dto, this.getAnimalDetectionImageUrl(dto.id), baseUrl);
+  },
+
+  async deleteAnimalDetection(
+    detectionId: string,
+    reason?: string
+  ): Promise<{
+    status: string;
+    id: string;
+    sourceFilename: string;
+    deletedAt: string;
+    deletedBy: string;
+    storageCleaned: boolean;
+    storagePreservedReason: string | null;
+  }> {
+    const qs = new URLSearchParams();
+    if (reason && reason.trim()) {
+      qs.set('reason', reason.trim());
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await apiRequest<ApiAnimalDetectionDeleteDto>(
+      `/detections/${detectionId}${suffix}`,
+      { method: 'DELETE' }
+    );
+    return {
+      status: res.status,
+      id: res.id,
+      sourceFilename: res.source_filename,
+      deletedAt: res.deleted_at,
+      deletedBy: res.deleted_by,
+      storageCleaned: Boolean(res.storage_cleaned),
+      storagePreservedReason: res.storage_preserved_reason ?? null,
+    };
+  },
+
+  async clearAnimalDetectionHistory(params: {
+    processingStatus?: string;
+    search?: string;
+    reason?: string;
+  } = {}): Promise<{
+    status: string;
+    clearedCount: number;
+    skippedUnauthorizedCount: number;
+    storageObjectsCleaned: number;
+    storageObjectsPreserved: number;
+  }> {
+    const qs = new URLSearchParams();
+    if (params.processingStatus && params.processingStatus !== 'All') {
+      qs.set('processing_status', params.processingStatus);
+    }
+    if (params.search && params.search.trim()) {
+      qs.set('search', params.search.trim());
+    }
+    if (params.reason && params.reason.trim()) {
+      qs.set('reason', params.reason.trim());
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await apiRequest<ApiAnimalDetectionClearDto>(`/detections${suffix}`, {
+      method: 'DELETE',
+    });
+    return {
+      status: res.status,
+      clearedCount: res.cleared_count,
+      skippedUnauthorizedCount: res.skipped_unauthorized_count,
+      storageObjectsCleaned: res.storage_objects_cleaned,
+      storageObjectsPreserved: res.storage_objects_preserved,
+    };
   },
 
   async uploadAnimalDetectionImage(params: {

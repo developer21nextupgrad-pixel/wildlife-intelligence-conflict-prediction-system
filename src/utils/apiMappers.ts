@@ -1054,6 +1054,11 @@ export interface ApiAnimalDetectionDto {
   detections: ApiAnimalDetectionItemDto[];
   model_metadata: ApiAnimalDetectionModelMetadataDto;
   error_message?: string | null;
+  uploaded_by_user_id?: string | null;
+  can_delete?: boolean;
+  is_deleted?: boolean;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1191,6 +1196,11 @@ export function mapAnimalDetectionFromApi(
       reidAmbiguousThreshold: dto.model_metadata?.reid_ambiguous_threshold ?? null,
     },
     errorMessage: dto.error_message ?? null,
+    uploadedByUserId: dto.uploaded_by_user_id ?? null,
+    canDelete: Boolean(dto.can_delete ?? false),
+    isDeleted: Boolean(dto.is_deleted ?? false),
+    deletedAt: dto.deleted_at ?? null,
+    deletedBy: dto.deleted_by ?? null,
     createdAt: dto.created_at,
     updatedAt: dto.updated_at,
   };

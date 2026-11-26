@@ -132,5 +132,37 @@ class AnimalDetectionResponse(BaseModel):
     detections: list[DetectionItemResponse]
     model_metadata: AnimalDetectionModelMetadata
     error_message: str | None = None
+    uploaded_by_user_id: uuid.UUID | None = None
+    can_delete: bool = False
+    is_deleted: bool = False
+    deleted_at: datetime | None = None
+    deleted_by: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AnimalDetectionListResponse(BaseModel):
+    items: list[AnimalDetectionResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    eligible_clear_count: int = 0
+
+
+class AnimalDetectionDeleteResponse(BaseModel):
+    status: Literal["archived"] = "archived"
+    id: uuid.UUID
+    source_filename: str
+    deleted_at: datetime
+    deleted_by: str
+    storage_cleaned: bool = False
+    storage_preserved_reason: str | None = None
+
+
+class AnimalDetectionClearResponse(BaseModel):
+    status: Literal["cleared"] = "cleared"
+    cleared_count: int
+    skipped_unauthorized_count: int = 0
+    storage_objects_cleaned: int = 0
+    storage_objects_preserved: int = 0

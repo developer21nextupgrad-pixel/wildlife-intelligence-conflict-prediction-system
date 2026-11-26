@@ -925,8 +925,8 @@ def test_alembic_0006_creates_users_table_preserves_data_and_supports_admin_boot
         )
     eng.dispose()
 
-    # Now upgrade to head (0006_security_reid_idemp) and confirm users table + preserved data
-    alembic_command.upgrade(cfg, "head")
+    # Now upgrade to 0006_security_reid_idemp and confirm users table + preserved data
+    alembic_command.upgrade(cfg, "0006_security_reid_idemp")
     eng2 = create_engine(db_url, future=True)
     insp = inspect(eng2)
     assert "users" in set(insp.get_table_names())

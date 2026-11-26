@@ -457,6 +457,11 @@ export interface AnimalDetectionRecord {
   detections: AnimalDetectionItem[];
   modelMetadata: AnimalDetectionModelMetadata;
   errorMessage?: string | null;
+  uploadedByUserId?: string | null;
+  canDelete?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: string | null;
+  deletedBy?: string | null;
   createdAt: string;
   updatedAt: string;
 }

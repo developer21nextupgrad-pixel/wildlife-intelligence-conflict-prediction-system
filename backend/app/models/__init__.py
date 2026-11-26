@@ -19,7 +19,7 @@ from app.models.risk_zone import RiskZone
 from app.models.sighting import Sighting
 from app.models.telemetry import TelemetryRecord
 from app.models.thermal_frame import ThermalFrame
-from app.models.user import UserAccount
+from app.models.user import PasswordResetToken, UserAccount
 from app.models.village import Village
 
 __all__ = [
@@ -44,6 +44,7 @@ __all__ = [
     "AlertDeliveryAttempt",
     "IotEventRecord",
     "UserAccount",
+    "PasswordResetToken",
 ]
 
 

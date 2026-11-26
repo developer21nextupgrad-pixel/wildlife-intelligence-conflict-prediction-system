@@ -4,6 +4,7 @@ import uuid
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -31,6 +32,8 @@ class AnimalDetection(TimestampMixin, Base):
         Index("ix_animal_detections_status", "processing_status"),
         Index("ix_animal_detections_primary_species", "primary_species"),
         Index("ix_animal_detections_camera_id", "camera_id"),
+        Index("ix_animal_detections_deleted_created", "is_deleted", "created_at"),
+        Index("ix_animal_detections_uploaded_by", "uploaded_by_user_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
@@ -73,6 +76,15 @@ class AnimalDetection(TimestampMixin, Base):
         GUID(), ForeignKey("sightings.id", ondelete="SET NULL"), nullable=True
     )
     generated_alert_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+
+    # History ownership & archival audit trail (soft deletion preserves wildlife evidence)
+    uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    deletion_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     detector_model: Mapped[str] = mapped_column(String(160), nullable=False)
     classifier_model: Mapped[str] = mapped_column(String(160), nullable=False)

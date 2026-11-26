@@ -21,6 +21,7 @@ import {
   onAuthUnauthorized,
   setStoredAuthSession,
 } from './utils/authStorage';
+import { parseResetPasswordTokenFromUrl, ParsedResetRoute } from './utils/authValidation';
 import { AuthLoginGate } from './components/AuthLoginGate';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -57,6 +58,30 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AuthenticatedUserProfile | null>(null);
   const [initialAuthStatus, setInitialAuthStatus] = useState<AuthStatusSummary | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState<boolean>(true);
+  const [resetRoute, setResetRoute] = useState<ParsedResetRoute>(() =>
+    typeof window !== 'undefined'
+      ? parseResetPasswordTokenFromUrl(window.location.pathname, window.location.search)
+      : { isResetRoute: false, token: null }
+  );
+
+  useEffect(() => {
+    const syncResetRoute = () => {
+      setResetRoute(
+        parseResetPasswordTokenFromUrl(window.location.pathname, window.location.search)
+      );
+    };
+    window.addEventListener('popstate', syncResetRoute);
+    return () => window.removeEventListener('popstate', syncResetRoute);
+  }, []);
+
+  const clearResetPasswordRoute = () => {
+    setResetRoute({ isResetRoute: false, token: null });
+    if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+      window.history.replaceState({}, '', '/');
+    } else if (typeof window !== 'undefined' && window.location.search) {
+      window.history.replaceState({}, '', '/');
+    }
+  };
 
   // Core Data States
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -379,6 +404,22 @@ export default function App() {
     setRiskZones([]);
     setApiError(null);
   };
+
+  if (resetRoute.isResetRoute) {
+    return (
+      <AuthLoginGate
+        initialAuthStatus={initialAuthStatus}
+        initialResetRoute
+        initialResetToken={resetRoute.token}
+        onExitResetFlow={clearResetPasswordRoute}
+        onAuthenticated={(user) => {
+          clearResetPasswordRoute();
+          setIsLoading(true);
+          setCurrentUser(user);
+        }}
+      />
+    );
+  }
 
   if (isCheckingSession) {
     return (

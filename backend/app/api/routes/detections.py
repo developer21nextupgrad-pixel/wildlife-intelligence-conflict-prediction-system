@@ -15,15 +15,17 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.database import get_db
-from app.core.security import require_roles
-from app.models import Alert, AnimalDetection
-from app.schemas.common import PaginatedResponse
+from app.core.security import AuthenticatedPrincipal, require_roles
+from app.models import Alert, AnimalDetection, AnimalEmbedding, ReidMatch, Sighting
 from app.schemas.detection import (
+    AnimalDetectionClearResponse,
+    AnimalDetectionDeleteResponse,
+    AnimalDetectionListResponse,
     AnimalDetectionModelMetadata,
     AnimalDetectionResponse,
     DetectionItemResponse,
@@ -94,6 +96,95 @@ def _resolve_sighting_status(record: AnimalDetection, explicit: str | None = Non
     return "not_linked"
 
 
+def _can_delete_detection(
+    record: AnimalDetection, principal: AuthenticatedPrincipal | None
+) -> bool:
+    if principal is None:
+        return False
+    effective = principal.effective_roles
+    if "admin" in effective or "reviewer" in effective:
+        return True
+    return principal.user_id is not None and record.uploaded_by_user_id == principal.user_id
+
+
+def _find_evidence_reference_reason(db: Session, record: AnimalDetection) -> str | None:
+    """Checks whether a detection's image/crops are still referenced by sightings, alerts, or Re-ID records."""
+    if record.generated_sighting_id is not None:
+        return "linked_sighting"
+    has_sighting = (
+        db.execute(
+            select(Sighting.id)
+            .where(Sighting.animal_detection_id == record.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    if has_sighting:
+        return "linked_sighting"
+
+    if record.generated_alert_ids:
+        return "linked_alert"
+    has_alert = (
+        db.execute(
+            select(Alert.id)
+            .where(Alert.animal_detection_id == record.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    if has_alert:
+        return "linked_alert"
+
+    has_embedding = (
+        db.execute(
+            select(AnimalEmbedding.id)
+            .where(AnimalEmbedding.detection_id == record.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    if has_embedding:
+        return "linked_reid_embedding"
+
+    has_reid_match = (
+        db.execute(
+            select(ReidMatch.id)
+            .where(ReidMatch.detection_id == record.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
+    if has_reid_match:
+        return "linked_reid_match"
+
+    return None
+
+
+def _build_detection_filter_stmt(
+    *,
+    processing_status: str | None = None,
+    search: str | None = None,
+    include_deleted: bool = False,
+):
+    stmt = select(AnimalDetection)
+    if not include_deleted:
+        stmt = stmt.where(AnimalDetection.is_deleted.is_(False))
+    if processing_status and processing_status != "All":
+        stmt = stmt.where(AnimalDetection.processing_status == processing_status)
+    if search and search.strip():
+        q = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                AnimalDetection.source_filename.ilike(q),
+                AnimalDetection.primary_species.ilike(q),
+                AnimalDetection.primary_common_name.ilike(q),
+                AnimalDetection.primary_scientific_name.ilike(q),
+                AnimalDetection.location_name.ilike(q),
+            )
+        )
+    return stmt
+
+
 def _record_to_response(
     record: AnimalDetection,
     settings: Settings,
@@ -101,6 +192,7 @@ def _record_to_response(
     db: Session | None = None,
     sighting_status_override: str | None = None,
     linked_alerts_override: list[Alert] | None = None,
+    principal: AuthenticatedPrincipal | None = None,
 ) -> AnimalDetectionResponse:
     items = [DetectionItemResponse.model_validate(item) for item in (record.detections or [])]
     image_url = f"{settings.api_v1_prefix.rstrip('/')}/detections/{record.id}/image"
@@ -186,6 +278,11 @@ def _record_to_response(
             ),
         ),
         error_message=record.error_message,
+        uploaded_by_user_id=record.uploaded_by_user_id,
+        can_delete=_can_delete_detection(record, principal),
+        is_deleted=record.is_deleted,
+        deleted_at=record.deleted_at,
+        deleted_by=record.deleted_by,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -213,7 +310,6 @@ async def _read_upload_bounded(upload: UploadFile, max_bytes: int) -> bytes:
     "/upload",
     response_model=AnimalDetectionResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_roles("operator"))],
 )
 async def upload_and_detect_animal(
     response: Response,
@@ -229,6 +325,7 @@ async def upload_and_detect_animal(
     auto_create_sighting: bool = Form(default=True),
     idempotency_key: str | None = Form(default=None),
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    principal: AuthenticatedPrincipal = Depends(require_roles("operator")),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     storage: ObjectStorageBackend = Depends(get_storage_backend),
@@ -239,11 +336,16 @@ async def upload_and_detect_animal(
     eff_idem_key = eff_idem_raw[:128] if eff_idem_raw else None
     if eff_idem_key:
         existing = db.execute(
-            select(AnimalDetection).where(AnimalDetection.idempotency_key == eff_idem_key)
+            select(AnimalDetection).where(
+                AnimalDetection.idempotency_key == eff_idem_key,
+                AnimalDetection.is_deleted.is_(False),
+            )
         ).scalar_one_or_none()
         if existing is not None:
             response.status_code = status.HTTP_200_OK
-            return _record_to_response(existing, settings, storage.backend_name, db=db)
+            return _record_to_response(
+                existing, settings, storage.backend_name, db=db, principal=principal
+            )
 
     if (latitude is None) != (longitude is None):
         raise HTTPException(
@@ -369,6 +471,8 @@ async def upload_and_detect_animal(
         location_name=location_ctx.location_name,
         idempotency_key=eff_idem_key,
         generated_alert_ids=[],
+        uploaded_by_user_id=principal.user_id,
+        is_deleted=False,
         detector_model=analysis["detector_model"],
         classifier_model=analysis["classifier_model"],
         inference_duration_ms=analysis["inference_duration_ms"],
@@ -448,68 +552,249 @@ async def upload_and_detect_animal(
         db=db,
         sighting_status_override=sighting_status_val,
         linked_alerts_override=created_alerts,
+        principal=principal,
     )
 
 
 @router.get(
     "",
-    response_model=PaginatedResponse[AnimalDetectionResponse],
-    dependencies=[Depends(require_roles("operator"))],
+    response_model=AnimalDetectionListResponse,
 )
 def list_animal_detections(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     processing_status: str | None = Query(default=None),
     search: str | None = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles("operator")),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     storage: ObjectStorageBackend = Depends(get_storage_backend),
-) -> PaginatedResponse[AnimalDetectionResponse]:
-    stmt = select(AnimalDetection)
-    if processing_status and processing_status != "All":
-        stmt = stmt.where(AnimalDetection.processing_status == processing_status)
-    if search and search.strip():
-        q = f"%{search.strip()}%"
-        stmt = stmt.where(
-            or_(
-                AnimalDetection.source_filename.ilike(q),
-                AnimalDetection.primary_species.ilike(q),
-                AnimalDetection.primary_common_name.ilike(q),
-                AnimalDetection.primary_scientific_name.ilike(q),
-                AnimalDetection.location_name.ilike(q),
-            )
+) -> AnimalDetectionListResponse:
+    stmt = _build_detection_filter_stmt(
+        processing_status=processing_status,
+        search=search,
+        include_deleted=False,
+    )
+
+    # Calculate eligible clear count for the caller under current filters
+    effective = principal.effective_roles
+    if "admin" in effective or "reviewer" in effective:
+        eligible_stmt = select(func.count()).select_from(stmt.subquery())
+        eligible_clear_count = int(db.execute(eligible_stmt).scalar_one() or 0)
+    elif principal.user_id is not None:
+        own_stmt = stmt.where(AnimalDetection.uploaded_by_user_id == principal.user_id)
+        eligible_clear_count = int(
+            db.execute(select(func.count()).select_from(own_stmt.subquery())).scalar_one() or 0
         )
+    else:
+        eligible_clear_count = 0
+
     stmt = stmt.order_by(AnimalDetection.created_at.desc())
     items, total, current_page, current_size, total_pages = paginate_select(
         db, stmt, page, page_size
     )
-    return PaginatedResponse[AnimalDetectionResponse](
-        items=[_record_to_response(item, settings, storage.backend_name, db=db) for item in items],
+    return AnimalDetectionListResponse(
+        items=[
+            _record_to_response(
+                item,
+                settings,
+                storage.backend_name,
+                db=db,
+                principal=principal,
+            )
+            for item in items
+        ],
         total=total,
         page=current_page,
         page_size=current_size,
         total_pages=total_pages,
+        eligible_clear_count=eligible_clear_count,
+    )
+
+
+@router.delete(
+    "",
+    response_model=AnimalDetectionClearResponse,
+)
+def clear_animal_detection_history(
+    processing_status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    reason: str | None = Query(default=None, max_length=255),
+    principal: AuthenticatedPrincipal = Depends(require_roles("operator")),
+    db: Session = Depends(get_db),
+    storage: ObjectStorageBackend = Depends(get_storage_backend),
+) -> AnimalDetectionClearResponse:
+    """Soft-deletes all eligible active detection history records for the authenticated caller.
+
+    Preserves linked sightings, alerts, incidents, animal identities, Re-ID embeddings, and crops.
+    Unreferenced source image objects are cleaned from storage only after the DB transaction commits.
+    """
+    base_stmt = _build_detection_filter_stmt(
+        processing_status=processing_status,
+        search=search,
+        include_deleted=False,
+    )
+    all_visible = list(db.execute(base_stmt).scalars().all())
+    eligible = [rec for rec in all_visible if _can_delete_detection(rec, principal)]
+    skipped = len(all_visible) - len(eligible)
+
+    if not eligible:
+        return AnimalDetectionClearResponse(
+            status="cleared",
+            cleared_count=0,
+            skipped_unauthorized_count=skipped,
+            storage_objects_cleaned=0,
+            storage_objects_preserved=0,
+        )
+
+    now = datetime.now(timezone.utc)
+    clean_reason = (reason or "Cleared from detection history").strip()[:255]
+    unreferenced_keys: list[str] = []
+    preserved_count = 0
+
+    try:
+        for record in eligible:
+            ref_reason = _find_evidence_reference_reason(db, record)
+            if ref_reason is None and record.image_object_key:
+                unreferenced_keys.append(record.image_object_key)
+            else:
+                preserved_count += 1
+
+            record.is_deleted = True
+            record.deleted_at = now
+            record.deleted_by = principal.audit_label
+            record.deletion_reason = clean_reason
+            # Release idempotency_key only if not needed, keeping record intact for audit
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to clear animal detection history for actor=%s", principal.audit_label)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear detection history. Database changes were rolled back.",
+        )
+
+    cleaned_count = 0
+    for key in unreferenced_keys:
+        try:
+            storage.delete(key)
+            cleaned_count += 1
+        except Exception:
+            logger.warning("Post-commit storage cleanup failed for unreferenced key=%s", key)
+
+    logger.info(
+        "Cleared animal detection history actor=%s cleared=%d skipped=%d storage_cleaned=%d storage_preserved=%d",
+        principal.audit_label,
+        len(eligible),
+        skipped,
+        cleaned_count,
+        preserved_count,
+    )
+    return AnimalDetectionClearResponse(
+        status="cleared",
+        cleared_count=len(eligible),
+        skipped_unauthorized_count=skipped,
+        storage_objects_cleaned=cleaned_count,
+        storage_objects_preserved=preserved_count,
     )
 
 
 @router.get(
     "/{detection_id}",
     response_model=AnimalDetectionResponse,
-    dependencies=[Depends(require_roles("operator"))],
 )
 def get_animal_detection(
     detection_id: uuid.UUID,
+    include_deleted: bool = Query(default=False),
+    principal: AuthenticatedPrincipal = Depends(require_roles("operator")),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     storage: ObjectStorageBackend = Depends(get_storage_backend),
 ) -> AnimalDetectionResponse:
     record = db.get(AnimalDetection, detection_id)
-    if not record:
+    allow_archived = include_deleted and ("admin" in principal.effective_roles)
+    if not record or (record.is_deleted and not allow_archived):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Animal detection record not found.",
         )
-    return _record_to_response(record, settings, storage.backend_name, db=db)
+    return _record_to_response(
+        record, settings, storage.backend_name, db=db, principal=principal
+    )
+
+
+@router.delete(
+    "/{detection_id}",
+    response_model=AnimalDetectionDeleteResponse,
+)
+def delete_animal_detection(
+    detection_id: uuid.UUID,
+    reason: str | None = Query(default=None, max_length=255),
+    principal: AuthenticatedPrincipal = Depends(require_roles("operator")),
+    db: Session = Depends(get_db),
+    storage: ObjectStorageBackend = Depends(get_storage_backend),
+) -> AnimalDetectionDeleteResponse:
+    """Soft-deletes/archives a single detection record with RBAC and evidence preservation."""
+    record = db.get(AnimalDetection, detection_id)
+    if not record or record.is_deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Animal detection record not found.",
+        )
+
+    if not _can_delete_detection(record, principal):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions. Only the uploader, a reviewer, or an administrator can delete this detection record.",
+        )
+
+    now = datetime.now(timezone.utc)
+    clean_reason = (reason or "Removed from detection history").strip()[:255]
+    ref_reason = _find_evidence_reference_reason(db, record)
+    key_to_clean = record.image_object_key if ref_reason is None else None
+
+    try:
+        record.is_deleted = True
+        record.deleted_at = now
+        record.deleted_by = principal.audit_label
+        record.deletion_reason = clean_reason
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to archive animal detection id=%s", detection_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete detection record. Database changes were rolled back.",
+        )
+
+    storage_cleaned = False
+    if key_to_clean:
+        try:
+            storage.delete(key_to_clean)
+            storage_cleaned = True
+        except Exception:
+            logger.warning(
+                "Post-commit storage cleanup failed for unreferenced detection id=%s key=%s",
+                detection_id,
+                key_to_clean,
+            )
+
+    logger.info(
+        "Archived animal detection id=%s actor=%s storage_cleaned=%s preserved_reason=%s",
+        detection_id,
+        principal.audit_label,
+        storage_cleaned,
+        ref_reason,
+    )
+    return AnimalDetectionDeleteResponse(
+        status="archived",
+        id=record.id,
+        source_filename=record.source_filename,
+        deleted_at=now,
+        deleted_by=principal.audit_label,
+        storage_cleaned=storage_cleaned,
+        storage_preserved_reason=ref_reason,
+    )
 
 
 @router.get("/{detection_id}/image", dependencies=[Depends(require_roles("operator"))])
