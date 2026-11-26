@@ -2514,40 +2514,108 @@ function isTcpPortOpen(host: string, port: number, timeoutMs = 300): Promise<boo
 async function startFastApiSidecar(): Promise<void> {
   const isProd = process.env.NODE_ENV === 'production';
   const explicitSidecarOptIn = process.env.WICPS_ENABLE_FASTAPI_SIDECAR === 'true';
-  if (process.env.WICPS_DISABLE_FASTAPI_SIDECAR === 'true' || (isProd && !explicitSidecarOptIn)) {
+  if (
+    HAS_EXTERNAL_FASTAPI_SIDECAR ||
+    process.env.WICPS_DISABLE_FASTAPI_SIDECAR === 'true' ||
+    (isProd && !explicitSidecarOptIn)
+  ) {
     return;
   }
   const backendDir = path.resolve(__dirname, 'backend');
-  const venvBinDir = path.join(backendDir, '.venv', 'bin');
-  const venvPython = path.join(venvBinDir, 'python');
-  const uvicornBin = path.join(venvBinDir, 'uvicorn');
-  const alembicBin = path.join(venvBinDir, 'alembic');
+  const isWin = process.platform === 'win32';
+  const venvBinDir = path.join(backendDir, '.venv', isWin ? 'Scripts' : 'bin');
+  const exeSuffix = isWin ? '.exe' : '';
+  const venvPython = path.join(venvBinDir, `python${exeSuffix}`);
+  const uvicornBin = path.join(venvBinDir, `uvicorn${exeSuffix}`);
+  const alembicBin = path.join(venvBinDir, `alembic${exeSuffix}`);
   const useVenvUvicorn = fs.existsSync(uvicornBin);
   const useVenvPython = fs.existsSync(venvPython);
   if (!useVenvUvicorn && !useVenvPython) {
-    console.warn('FastAPI sidecar skipped: backend/.venv/bin/uvicorn not found.');
+    console.warn(
+      `FastAPI sidecar skipped: ${uvicornBin} not found. Start FastAPI manually or create backend/.venv.`
+    );
     return;
   }
+
+  // Load root .env and backend/.env explicitly to know whether the user configured DATABASE_URL locally.
+  const parseEnvFile = (filePath: string): Record<string, string> => {
+    if (!fs.existsSync(filePath)) return {};
+    try {
+      return dotenv.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (err) {
+      console.warn(`[WICPS] Could not parse ${filePath}:`, err);
+      return {};
+    }
+  };
+  const rootEnvFileValues = parseEnvFile(path.join(__dirname, '.env'));
+  const backendEnvFileValues = parseEnvFile(path.join(backendDir, '.env'));
 
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PYTHONUNBUFFERED: '1',
     FASTAPI_SIDECAR_URL,
   };
+  // Drop blank KEY= placeholders copied from .env.example so Pydantic defaults and backend/.env work cleanly.
+  for (const [key, val] of Object.entries(childEnv)) {
+    if (typeof val === 'string' && val.trim() === '') {
+      delete childEnv[key];
+    }
+  }
+  for (const [key, val] of Object.entries(backendEnvFileValues)) {
+    if (val.trim() !== '' && !childEnv[key]) {
+      childEnv[key] = val.trim();
+    }
+  }
   if (!childEnv.AUTH_JWT_SECRET) {
     childEnv.AUTH_JWT_SECRET = crypto.randomBytes(32).toString('hex');
   }
 
-  if (process.env.FASTAPI_SIDECAR_DATABASE_URL) {
-    childEnv.DATABASE_URL = process.env.FASTAPI_SIDECAR_DATABASE_URL;
-  } else if (
-    !childEnv.DATABASE_URL ||
-    childEnv.DATABASE_URL.includes('@localhost:5432') ||
-    childEnv.DATABASE_URL.includes('@127.0.0.1:5432')
-  ) {
-    const pgUp = childEnv.DATABASE_URL ? await isTcpPortOpen('127.0.0.1', 5432) : false;
+  const configuredInEnvFile = Boolean(
+    (backendEnvFileValues.DATABASE_URL || '').trim() ||
+      (rootEnvFileValues.DATABASE_URL || '').trim() ||
+      (process.env.FASTAPI_SIDECAR_DATABASE_URL || '').trim()
+  );
+  const explicitDbUrl =
+    (process.env.FASTAPI_SIDECAR_DATABASE_URL || '').trim() ||
+    (childEnv.DATABASE_URL || '').trim();
+  const isDefaultLocalPlaceholder =
+    explicitDbUrl === 'postgresql+psycopg://wicps_user:wicps_dev_password@localhost:5432/wicps' ||
+    explicitDbUrl === 'postgresql://wicps_user:wicps_dev_password@localhost:5432/wicps';
+
+  let usingUnconfiguredSqliteFallback = false;
+  if (!explicitDbUrl) {
+    childEnv.DATABASE_URL = 'sqlite:///./wicps_dev_phase1.db';
+    usingUnconfiguredSqliteFallback = true;
+  } else if (!configuredInEnvFile && isDefaultLocalPlaceholder) {
+    // Cloud preview / unconfigured shell default: use PostgreSQL if listening on 5432, else SQLite preview DB.
+    const pgUp = await isTcpPortOpen('127.0.0.1', 5432);
     if (!pgUp) {
       childEnv.DATABASE_URL = 'sqlite:///./wicps_dev_phase1.db';
+      usingUnconfiguredSqliteFallback = true;
+    } else {
+      childEnv.DATABASE_URL = explicitDbUrl;
+    }
+  } else {
+    // Explicitly configured DATABASE_URL (from .env, backend/.env, or non-default env var):
+    // NEVER silently substitute SQLite.
+    childEnv.DATABASE_URL = explicitDbUrl;
+    if (
+      explicitDbUrl.includes('@localhost:') ||
+      explicitDbUrl.includes('@127.0.0.1:')
+    ) {
+      try {
+        const parsedDb = new URL(explicitDbUrl.replace(/^postgresql\+[^:]+:\/\//, 'postgresql://'));
+        const dbHost = parsedDb.hostname || '127.0.0.1';
+        const dbPort = Number(parsedDb.port || 5432);
+        const pgUp = await isTcpPortOpen(dbHost, dbPort);
+        if (!pgUp) {
+          console.warn(
+            `[WICPS] Configured database at ${dbHost}:${dbPort}/${parsedDb.pathname.replace(/^\//, '')} is not accepting connections. Start PostgreSQL or verify DATABASE_URL.`
+          );
+        }
+      } catch {
+        // Leave validation to SQLAlchemy/FastAPI
+      }
     }
   }
 
@@ -2559,8 +2627,8 @@ async function startFastApiSidecar(): Promise<void> {
   }
   if (
     process.env.FASTAPI_SIDECAR_AUTO_SEED !== 'false' &&
-    (!childEnv.AUTO_SEED_DEMO_DATA ||
-      childEnv.DATABASE_URL === 'sqlite:///./wicps_dev_phase1.db')
+    usingUnconfiguredSqliteFallback &&
+    !childEnv.AUTO_SEED_DEMO_DATA
   ) {
     childEnv.AUTO_SEED_DEMO_DATA = 'true';
   }
@@ -2569,7 +2637,10 @@ async function startFastApiSidecar(): Promise<void> {
     childEnv.MEGADESCRIPTOR_PRELOAD_ON_STARTUP = 'false';
   }
 
-  if (fs.existsSync(alembicBin)) {
+  // Only auto-run Alembic migrations on the unconfigured SQLite preview DB or when explicitly opted in.
+  const shouldAutoMigrate =
+    usingUnconfiguredSqliteFallback || process.env.FASTAPI_SIDECAR_AUTO_MIGRATE === 'true';
+  if (shouldAutoMigrate && fs.existsSync(alembicBin)) {
     try {
       execFileSync(alembicBin, ['-c', 'alembic.ini', 'upgrade', 'head'], {
         cwd: backendDir,

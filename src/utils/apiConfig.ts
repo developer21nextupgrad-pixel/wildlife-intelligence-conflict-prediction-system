@@ -138,6 +138,33 @@ export function clearSavedApiBaseUrl(storage: StorageLike | null = getDefaultSto
   }
 }
 
+export function resolveEnvApiBaseUrl(options?: {
+  rawEnvUrl?: string | null;
+  pageOrigin?: string | null;
+  pageProtocol?: string | null;
+}): string {
+  const rawEnv = (options?.rawEnvUrl || '').trim();
+  const pageOrigin = (options?.pageOrigin || '').trim().replace(/\/+$/, '');
+  const browserOriginFallback = pageOrigin
+    ? `${pageOrigin}/api/v1`
+    : DEFAULT_LOCAL_API_BASE_URL;
+
+  if (!rawEnv) {
+    return normalizeApiBaseUrl(browserOriginFallback, browserOriginFallback);
+  }
+
+  // Only redirect localhost VITE_API_BASE_URL to same-origin when the page itself is served from
+  // a remote/HTTPS preview host (where browser Mixed Content / PNA blocks http://localhost:8000).
+  const isRemotePage =
+    Boolean(pageOrigin) &&
+    (options?.pageProtocol === 'https:' || !isLocalhostUrl(pageOrigin));
+  if (isRemotePage && isLocalhostUrl(rawEnv)) {
+    return normalizeApiBaseUrl(browserOriginFallback, browserOriginFallback);
+  }
+
+  return normalizeApiBaseUrl(rawEnv, browserOriginFallback);
+}
+
 export function resolveActiveApiBaseUrl(options?: {
   envUrl?: string | null;
   storage?: StorageLike | null;

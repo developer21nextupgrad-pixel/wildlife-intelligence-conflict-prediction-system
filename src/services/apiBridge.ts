@@ -98,6 +98,7 @@ import {
   normalizeApiBaseUrl,
   readSavedApiBaseUrl,
   resolveActiveApiBaseUrl,
+  resolveEnvApiBaseUrl,
   SETTINGS_STORAGE_KEY,
   writeSavedApiBaseUrl,
 } from '../utils/apiConfig';
@@ -166,17 +167,11 @@ export function getEnvApiBaseUrl(): string {
     typeof import.meta.env.VITE_API_BASE_URL === 'string'
       ? import.meta.env.VITE_API_BASE_URL.trim()
       : '';
-  const browserOriginFallback =
-    typeof window !== 'undefined' && window.location?.origin
-      ? `${window.location.origin}/api/v1`
-      : DEFAULT_LOCAL_API_BASE_URL;
-
-  // In unified server.ts preview/runtime, port 8000 is not the browser-facing API origin;
-  // route localhost env defaults through same-origin /api/v1 unless explicitly overridden in Settings.
-  if (!rawEnv || (typeof window !== 'undefined' && window.location?.origin && isLocalhostUrl(rawEnv))) {
-    return normalizeApiBaseUrl(browserOriginFallback, browserOriginFallback);
-  }
-  return normalizeApiBaseUrl(rawEnv, browserOriginFallback);
+  return resolveEnvApiBaseUrl({
+    rawEnvUrl: rawEnv,
+    pageOrigin: typeof window !== 'undefined' ? window.location?.origin : null,
+    pageProtocol: typeof window !== 'undefined' ? window.location?.protocol : null,
+  });
 }
 
 export function getConfiguredApiBaseUrl(): string {

@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: wicps_user
       POSTGRES_PASSWORD: wicps_dev_password
     ports:
-      - "5432:5432"
+      - "${WICPS_PG_PORT:-5432}:5432"
     volumes:
       - wicps_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,7 +34,7 @@ services:
       CORS_ORIGIN_REGEX: "^https://(ais-[a-z0-9-]+\\.[a-z0-9.-]+\\.run\\.app|[a-z0-9-]+\\.scf\\.usercontent\\.goog)$$"
       RATE_LIMIT_REQUESTS: "180"
       RATE_LIMIT_WINDOW_SECONDS: "60"
-      AUTO_SEED_DEMO_DATA: "true"
+      AUTO_SEED_DEMO_DATA: "${AUTO_SEED_DEMO_DATA:-true}"
       EXPOSE_TELEMETRY_COORDS: "false"
     ports:
       - "8000:8000"

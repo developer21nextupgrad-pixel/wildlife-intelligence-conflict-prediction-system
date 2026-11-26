@@ -10,6 +10,7 @@ import {
   normalizeApiBaseUrl,
   readSavedApiBaseUrl,
   resolveActiveApiBaseUrl,
+  resolveEnvApiBaseUrl,
   StorageLike,
   writeSavedApiBaseUrl,
 } from './apiConfig';
@@ -106,4 +107,33 @@ test('formatApiUnreachableMessage diagnoses HTTPS preview localhost vs HTTPS tun
     pageOrigin: 'http://localhost:3000',
   });
   assert.match(localMsg, /Ensure the FastAPI \+ PostGIS server is running/);
+});
+
+test('resolveEnvApiBaseUrl honors localhost VITE_API_BASE_URL locally but uses same-origin on remote HTTPS preview', () => {
+  assert.equal(
+    resolveEnvApiBaseUrl({
+      rawEnvUrl: 'http://localhost:8000/api/v1',
+      pageOrigin: 'http://localhost:3000',
+      pageProtocol: 'http:',
+    }),
+    'http://localhost:8000/api/v1'
+  );
+
+  assert.equal(
+    resolveEnvApiBaseUrl({
+      rawEnvUrl: '',
+      pageOrigin: 'http://localhost:3000',
+      pageProtocol: 'http:',
+    }),
+    'http://localhost:3000/api/v1'
+  );
+
+  assert.equal(
+    resolveEnvApiBaseUrl({
+      rawEnvUrl: 'http://localhost:8000/api/v1',
+      pageOrigin: 'https://ais-dev-example.asia-east1.run.app',
+      pageProtocol: 'https:',
+    }),
+    'https://ais-dev-example.asia-east1.run.app/api/v1'
+  );
 });

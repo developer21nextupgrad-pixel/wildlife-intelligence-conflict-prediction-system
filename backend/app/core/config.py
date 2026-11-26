@@ -1,7 +1,14 @@
 from functools import lru_cache
+from pathlib import Path
 import secrets
+from typing import Any
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = BACKEND_DIR.parent
+ROOT_ENV_FILE = PROJECT_ROOT / ".env"
+BACKEND_ENV_FILE = BACKEND_DIR / ".env"
 
 
 def _clean_optional_str(value: str | None) -> str | None:
@@ -13,9 +20,22 @@ def _clean_optional_str(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _normalize_db_url_string(raw_url: str) -> str:
+    cleaned = _clean_optional_str(raw_url) or ""
+    if cleaned.startswith("postgres://"):
+        return "postgresql+psycopg://" + cleaned[len("postgres://") :]
+    if cleaned.startswith("postgresql://"):
+        return "postgresql+psycopg://" + cleaned[len("postgresql://") :]
+    if cleaned.startswith("postgresql+psycopg2://"):
+        return "postgresql+psycopg://" + cleaned[len("postgresql+psycopg2://") :]
+    return cleaned
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Load project-root .env first, then backend/.env (higher precedence), regardless of CWD.
+        # Explicit OS environment variables always override both .env files.
+        env_file=(str(ROOT_ENV_FILE), str(BACKEND_ENV_FILE)),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -114,6 +134,32 @@ class Settings(BaseSettings):
     # Phase 3: Notification provider mode & IoT boundary contract settings
     notification_provider_mode: str = "stub"  # "stub" | "webhook_disabled"
     default_sighting_repeat_window_minutes: int = 120
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_blank_env_placeholders(cls, data: Any) -> Any:
+        """Treat blank KEY= placeholders (e.g. copied from .env.example) as unset so field defaults apply."""
+        if not isinstance(data, dict):
+            return data
+        # Preserve explicit empty values for allowlist fields whose empty string has semantic meaning
+        # (e.g. production validation must reject empty CORS_ORIGINS).
+        preserve_empty_keys = {"cors_origins", "cors_origin_regex", "rtsp_allowed_hosts"}
+        cleaned: dict[str, Any] = {}
+        for key, value in data.items():
+            if (
+                isinstance(value, str)
+                and not value.strip()
+                and key.lower() not in preserve_empty_keys
+            ):
+                continue
+            cleaned[key] = value
+        return cleaned
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url_field(cls, value: str | None) -> str:
+        normalized = _normalize_db_url_string(value or "")
+        return normalized or "postgresql+psycopg://wicps_user:wicps_dev_password@localhost:5432/wicps"
 
     @field_validator(
         "s3_endpoint_url",

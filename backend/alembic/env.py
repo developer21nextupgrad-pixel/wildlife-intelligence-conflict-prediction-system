@@ -1,11 +1,12 @@
+import logging
 from logging.config import fileConfig
 import os
 
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-from app.core.config import get_settings
-from app.core.database import normalize_database_url
+from app.core.config import Settings
+from app.core.database import normalize_database_url, redact_database_url
 from app.models import Base
 
 config = context.config
@@ -13,10 +14,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
+logger = logging.getLogger("alembic.env")
+
 
 def resolve_migration_database_url() -> str:
-    """Resolve and validate the Alembic target DATABASE_URL safely."""
-    settings = get_settings()
+    """Resolve and validate the Alembic target DATABASE_URL identically to FastAPI Settings."""
+    settings = Settings()
     env_name = (os.environ.get("ENVIRONMENT") or settings.environment or "").strip().lower()
     raw_env_url = (os.environ.get("DATABASE_URL") or "").strip()
 
@@ -42,6 +45,7 @@ def resolve_migration_database_url() -> str:
 
 
 db_url = resolve_migration_database_url()
+logger.info("Alembic target database: %s", redact_database_url(db_url))
 target_metadata = Base.metadata
 
 
