@@ -264,6 +264,7 @@ async def upload_and_detect_animal(
     parsed_camera_id = _parse_optional_uuid(camera_id, "camera_id")
     parsed_village_id = _parse_optional_uuid(village_id, "village_id")
 
+    
     try:
         location_ctx = resolve_detection_context(
             db,
@@ -281,6 +282,8 @@ async def upload_and_detect_animal(
             else status.HTTP_422_UNPROCESSABLE_ENTITY
         )
         raise HTTPException(status_code=err_status, detail=msg) from exc
+
+    db.commit()
 
     observed_at = captured_at or datetime.now(timezone.utc)
     if observed_at.tzinfo is None:

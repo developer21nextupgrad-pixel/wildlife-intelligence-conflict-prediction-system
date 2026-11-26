@@ -17,3 +17,6 @@ backend/storage_dev/
 backend/*.db
 .playwright-cli/
 
+
+# Python virtual environments
+backend/.venv312/
