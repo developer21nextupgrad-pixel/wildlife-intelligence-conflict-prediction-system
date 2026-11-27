@@ -113,6 +113,12 @@ import {
   UserAccountRecord,
   WicpsRole,
 } from '../utils/authStorage';
+import {
+  AssistantHistoryPayloadItem,
+  AssistantMapLocation,
+  AssistantSourceRecord,
+  AssistantStatus,
+} from '../utils/assistantHelpers';
 
 const STORAGE_KEYS = {
   LEGACY_VILLAGES: 'wicps_villages_v1',
@@ -1512,6 +1518,94 @@ export const apiBridge = {
     };
     saveToStorage(STORAGE_KEYS.SETTINGS, updated);
     return updated;
+  },
+
+  async getAssistantStatus(): Promise<AssistantStatus> {
+    const dto = await apiRequest<{
+      configured: boolean;
+      model: string;
+      read_only: boolean;
+      available_tools: string[];
+      message?: string | null;
+    }>('/assistant/status', { method: 'GET' });
+    return {
+      configured: Boolean(dto.configured),
+      model: dto.model || 'gemini-4-hydrogen',
+      readOnly: dto.read_only !== false,
+      availableTools: Array.isArray(dto.available_tools) ? dto.available_tools : [],
+      message: dto.message ?? null,
+    };
+  },
+
+  async sendAssistantMessage(input: {
+    message: string;
+    history: AssistantHistoryPayloadItem[];
+    activeDistrict?: string;
+    activeDateRange?: string;
+  }): Promise<{
+    reply: string;
+    model: string;
+    toolsUsed: string[];
+    sources: AssistantSourceRecord[];
+    mapLocations: AssistantMapLocation[];
+    generatedAt: string;
+    readOnly: boolean;
+  }> {
+    const dto = await apiRequest<{
+      reply: string;
+      model: string;
+      tools_used?: string[];
+      sources?: Array<{ tool: string; label: string; record_count: number }>;
+      map_locations?: Array<{
+        id: string;
+        label: string;
+        kind: AssistantMapLocation['kind'];
+        latitude: number;
+        longitude: number;
+        district?: string | null;
+        risk_level?: string | null;
+        risk_score?: number | null;
+        subtitle?: string | null;
+      }>;
+      generated_at: string;
+      read_only?: boolean;
+    }>('/assistant/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        message: input.message.trim(),
+        history: input.history,
+        active_district: input.activeDistrict || null,
+        active_date_range: input.activeDateRange || null,
+      }),
+    });
+
+    return {
+      reply: dto.reply,
+      model: dto.model,
+      toolsUsed: Array.isArray(dto.tools_used) ? dto.tools_used : [],
+      sources: Array.isArray(dto.sources)
+        ? dto.sources.map((s) => ({
+            tool: s.tool,
+            label: s.label,
+            recordCount: Number(s.record_count || 0),
+          }))
+        : [],
+      mapLocations: Array.isArray(dto.map_locations)
+        ? dto.map_locations.map((loc) => ({
+            id: loc.id,
+            label: loc.label,
+            kind: loc.kind,
+            latitude: Number(loc.latitude),
+            longitude: Number(loc.longitude),
+            district: loc.district ?? null,
+            riskLevel: loc.risk_level ?? null,
+            riskScore: loc.risk_score ?? null,
+            subtitle: loc.subtitle ?? null,
+          }))
+        : [],
+      generatedAt: dto.generated_at,
+      readOnly: dto.read_only !== false,
+    };
   },
 
   async resetLocalSettings(): Promise<void> {

@@ -26,6 +26,15 @@ import {
   matchesDivisionOrRange,
 } from '../utils/wicpsFilters';
 
+export interface GisFocusLocation {
+  id?: string;
+  label: string;
+  kind?: string;
+  latitude: number;
+  longitude: number;
+  timestamp: number;
+}
+
 interface GisRiskMapViewProps {
   incidents: Incident[];
   sightings: AnimalSighting[];
@@ -39,6 +48,7 @@ interface GisRiskMapViewProps {
   isApiLoading?: boolean;
   apiError?: string | null;
   onRetrySync?: () => void;
+  focusLocation?: GisFocusLocation | null;
 }
 
 type SelectedMapFeature =
@@ -61,6 +71,7 @@ export const GisRiskMapView: React.FC<GisRiskMapViewProps> = ({
   isApiLoading = false,
   apiError = null,
   onRetrySync,
+  focusLocation = null,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -195,6 +206,58 @@ export const GisRiskMapView: React.FC<GisRiskMapViewProps> = ({
       }
     };
   }, []);
+
+  // Fly to location requested by AI Wildlife Intelligence Assistant
+  useEffect(() => {
+    if (!focusLocation || !mapInstanceRef.current) return;
+    const { latitude, longitude, label, kind } = focusLocation;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+    mapInstanceRef.current.flyTo([latitude, longitude], 13, { duration: 0.9 });
+
+    const normLabel = label.trim().toLowerCase();
+    if (kind === 'village') {
+      const matched = villages.find(
+        (v) =>
+          v.name.trim().toLowerCase() === normLabel ||
+          (Math.abs(v.coordinates[0] - latitude) < 0.002 &&
+            Math.abs(v.coordinates[1] - longitude) < 0.002)
+      );
+      if (matched) {
+        setSelectedFeature({ type: 'village', data: matched });
+        return;
+      }
+    }
+    if (kind === 'risk_zone') {
+      const matched = riskZones.find((z) => z.name.trim().toLowerCase() === normLabel);
+      if (matched) {
+        setSelectedFeature({ type: 'riskZone', data: matched });
+        return;
+      }
+    }
+    if (kind === 'incident') {
+      const matched = incidents.find(
+        (i) =>
+          normLabel.includes(i.incidentCode.toLowerCase()) ||
+          (Math.abs(i.latitude - latitude) < 0.002 &&
+            Math.abs(i.longitude - longitude) < 0.002)
+      );
+      if (matched) {
+        setSelectedFeature({ type: 'incident', data: matched });
+        return;
+      }
+    }
+    if (kind === 'sighting') {
+      const matched = sightings.find(
+        (s) =>
+          Math.abs(s.latitude - latitude) < 0.002 &&
+          Math.abs(s.longitude - longitude) < 0.002
+      );
+      if (matched) {
+        setSelectedFeature({ type: 'sighting', data: matched });
+      }
+    }
+  }, [focusLocation, villages, riskZones, incidents, sightings]);
 
   // Update Layers & Markers based on filters & data
   useEffect(() => {

@@ -36,6 +36,8 @@ services:
       RATE_LIMIT_WINDOW_SECONDS: "60"
       AUTO_SEED_DEMO_DATA: "${AUTO_SEED_DEMO_DATA:-true}"
       EXPOSE_TELEMETRY_COORDS: "false"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GEMINI_MODEL: "${GEMINI_MODEL:-gemini-4-hydrogen}"
     ports:
       - "8000:8000"
     healthcheck:

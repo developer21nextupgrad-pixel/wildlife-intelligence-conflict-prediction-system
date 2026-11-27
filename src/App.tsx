@@ -26,7 +26,7 @@ import { AuthLoginGate } from './components/AuthLoginGate';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
-import { GisRiskMapView } from './components/GisRiskMapView';
+import { GisRiskMapView, GisFocusLocation } from './components/GisRiskMapView';
 import { IncidentManagementView } from './components/IncidentManagementView';
 import { AnimalSightingsView } from './components/AnimalSightingsView';
 import { AiRiskPredictionView } from './components/AiRiskPredictionView';
@@ -38,6 +38,8 @@ import { UserManagementView } from './components/UserManagementView';
 import { SettingsView } from './components/SettingsView';
 import { ThermalIngestionView } from './components/ThermalIngestionView';
 import { AnimalDetectionView } from './components/AnimalDetectionView';
+import { WildlifeAiAssistant } from './components/WildlifeAiAssistant';
+import { AssistantMapLocation } from './utils/assistantHelpers';
 import { Menu, X, TreePine, Users, Server, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function App() {
@@ -53,6 +55,7 @@ export default function App() {
 
   // Administration Sub-tab (Personnel vs System Bridge)
   const [adminSubTab, setAdminSubTab] = useState<'personnel' | 'bridge'>('personnel');
+  const [mapFocusLocation, setMapFocusLocation] = useState<GisFocusLocation | null>(null);
 
   // Authentication & RBAC Session State
   const [currentUser, setCurrentUser] = useState<AuthenticatedUserProfile | null>(null);
@@ -681,6 +684,7 @@ export default function App() {
               isApiLoading={isSyncingApi}
               apiError={apiError}
               onRetrySync={refreshAllData}
+              focusLocation={mapFocusLocation}
             />
           )}
 
@@ -853,6 +857,23 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Floating AI Wildlife Intelligence Assistant (Visible across all authenticated pages) */}
+      <WildlifeAiAssistant
+        activeDistrict={selectedDistrict}
+        activeDateRange={dateRange}
+        onFocusMapLocation={(loc: AssistantMapLocation) => {
+          setMapFocusLocation({
+            id: loc.id,
+            label: loc.label,
+            kind: loc.kind,
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            timestamp: Date.now(),
+          });
+          setActiveTab('wildlife-risk-map');
+        }}
+      />
     </div>
   );
 }

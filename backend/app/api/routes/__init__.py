@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.routes import (
     alerts,
     animal_intelligence,
+    assistant,
     auth,
     cameras,
     detections,
@@ -19,6 +20,7 @@ from app.api.routes import (
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(health.router)
+api_router.include_router(assistant.router)
 api_router.include_router(incidents.router)
 api_router.include_router(sightings.router)
 api_router.include_router(villages.router)

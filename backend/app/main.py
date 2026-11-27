@@ -113,6 +113,10 @@ def create_application(custom_settings: Settings | None = None) -> FastAPI:
             settings.auth_password_reset_rate_limit_requests * 2,
             settings.auth_password_reset_rate_limit_window_seconds,
         ),
+        f"{settings.api_v1_prefix}/assistant/chat": (
+            settings.assistant_rate_limit_requests,
+            settings.assistant_rate_limit_window_seconds,
+        ),
     }
     application.add_middleware(
         RateLimitMiddleware,

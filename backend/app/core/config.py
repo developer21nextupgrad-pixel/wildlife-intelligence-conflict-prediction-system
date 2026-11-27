@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     auth_register_rate_limit_window_seconds: int = 300
     auth_password_reset_rate_limit_requests: int = 5
     auth_password_reset_rate_limit_window_seconds: int = 300
+    assistant_rate_limit_requests: int = 20
+    assistant_rate_limit_window_seconds: int = 60
     rate_limit_redis_url: str | None = None
 
     # Phase A Security: JWT / OIDC Authentication & RBAC
@@ -87,6 +89,12 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: int = 15
     frontend_url: str | None = None
     frontend_base_url: str = "http://localhost:3000"
+
+    # AI Wildlife Intelligence Assistant (Server-side Gemini API)
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-4-hydrogen"
+    gemini_timeout_seconds: float = 30.0
+    assistant_max_history_messages: int = 12
 
     auto_seed_demo_data: bool = False
     # Security safeguard: never expose sensitive animal telemetry GPS coordinates publicly.
@@ -177,6 +185,7 @@ class Settings(BaseSettings):
         "smtp_username",
         "smtp_password",
         "frontend_url",
+        "gemini_api_key",
         mode="before",
     )
     @classmethod
@@ -198,6 +207,7 @@ class Settings(BaseSettings):
             self.frontend_base_url = self.frontend_base_url.strip().rstrip("/") or "http://localhost:3000"
         self.smtp_host = (_clean_optional_str(self.smtp_host) or "smtp.gmail.com")
         self.smtp_from_email = (_clean_optional_str(self.smtp_from_email) or "")
+        self.gemini_model = (_clean_optional_str(self.gemini_model) or "gemini-4-hydrogen")
         endpoint = (self.s3_endpoint_url or "").lower()
         is_tigris_or_r2 = any(
             domain in endpoint
@@ -220,6 +230,7 @@ class Settings(BaseSettings):
         "auth_login_rate_limit_requests",
         "auth_register_rate_limit_requests",
         "auth_password_reset_rate_limit_requests",
+        "assistant_rate_limit_requests",
     )
     @classmethod
     def validate_rate_limit_requests(cls, value: int) -> int:
@@ -232,6 +243,7 @@ class Settings(BaseSettings):
         "auth_login_rate_limit_window_seconds",
         "auth_register_rate_limit_window_seconds",
         "auth_password_reset_rate_limit_window_seconds",
+        "assistant_rate_limit_window_seconds",
     )
     @classmethod
     def validate_rate_limit_window(cls, value: int) -> int:

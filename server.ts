@@ -1355,6 +1355,7 @@ function forwardToFastApiSidecar(req: Request, res: Response) {
 app.use(
   [
     `${API_PREFIX}/auth`,
+    `${API_PREFIX}/assistant`,
     `${API_PREFIX}/cameras`,
     `${API_PREFIX}/ingest`,
     `${API_PREFIX}/detections`,
