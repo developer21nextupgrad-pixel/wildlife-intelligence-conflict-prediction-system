@@ -477,8 +477,26 @@ def request_password_reset(
     settings: Settings = Depends(get_settings),
     email_service: SmtpEmailService = Depends(_get_email_service_dep),
 ) -> ForgotPasswordResponse:
-    """Generates a single-use hashed reset token and sends a recovery email without leaking account existence."""
+    """Generates a single-use hashed reset token and sends a recovery email via SMTP without leaking account existence."""
     email = _validate_email_format(payload.email)
+
+    # Check SMTP configuration BEFORE user lookup so misconfiguration fails identically
+    # for registered and unregistered emails (no account enumeration, no fake 200 OK).
+    config_error = email_service.get_configuration_error()
+    if config_error is not None:
+        logger.error(
+            "Password reset request rejected because email delivery is not configured: %s",
+            config_error,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Password reset email service is not configured on the server. "
+                "Please configure SMTP credentials (SMTP_HOST, SMTP_PORT, SMTP_USERNAME, "
+                "SMTP_PASSWORD, SMTP_FROM_EMAIL) or contact your system administrator."
+            ),
+        )
+
     user = db.execute(
         select(UserAccount).where(func.lower(UserAccount.email) == email)
     ).scalar_one_or_none()
@@ -522,18 +540,48 @@ def request_password_reset(
     except Exception:
         db.rollback()
         logger.exception("Failed to persist password reset token for user_id=%s", user.id)
-        return ForgotPasswordResponse(
-            status="accepted",
-            message=_GENERIC_FORGOT_PASSWORD_MESSAGE,
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to initiate password reset right now. Please try again shortly.",
         )
 
-    reset_url = build_password_reset_url(settings.frontend_base_url, raw_token)
-    email_service.send_password_reset_email(
+    reset_url = build_password_reset_url(settings.effective_frontend_url, raw_token)
+    dispatch_result = email_service.send_password_reset_email(
         to_email=user.email,
         display_name=user.display_name,
         reset_url=reset_url,
         expire_minutes=settings.password_reset_token_expire_minutes,
     )
+
+    if not dispatch_result.sent:
+        # Invalidate the newly issued token immediately so undelivered tokens cannot remain active.
+        try:
+            db.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.id == token_record.id,
+                    PasswordResetToken.used_at.is_(None),
+                )
+                .values(used_at=datetime.now(timezone.utc))
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to invalidate undelivered reset token for user_id=%s", user.id)
+
+        logger.error(
+            "Password reset email delivery failed for user_id=%s provider=%s error_code=%s",
+            user.id,
+            dispatch_result.provider,
+            dispatch_result.error_code or dispatch_result.reason,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Unable to deliver the password reset email right now due to a mail server error. "
+                "Please try again later or contact your system administrator."
+            ),
+        )
 
     return ForgotPasswordResponse(
         status="accepted",

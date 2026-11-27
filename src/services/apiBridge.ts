@@ -521,6 +521,12 @@ export const apiBridge = {
       method: 'POST',
       body: JSON.stringify({ email: email.trim() }),
     });
+    if (!res || res.status !== 'accepted' || typeof res.message !== 'string') {
+      throw new ApiBridgeError(
+        'Password reset request was not accepted by the backend email service.',
+        502
+      );
+    }
     return { status: res.status, message: res.message };
   },
 

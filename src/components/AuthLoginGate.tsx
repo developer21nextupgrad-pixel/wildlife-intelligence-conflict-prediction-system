@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -62,6 +62,8 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({
 
   // Forgot password form state
   const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotCooldownSec, setForgotCooldownSec] = useState(0);
+  const forgotInFlightRef = useRef(false);
 
   // Reset password form state
   const [resetValidating, setResetValidating] = useState<boolean>(initialResetRoute);
@@ -93,9 +95,18 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({
     if (mode === 'reset' && nextMode !== 'reset') {
       onExitResetFlow?.();
     }
+    setForgotCooldownSec(0);
     clearFeedback();
     setMode(nextMode);
   };
+
+  useEffect(() => {
+    if (forgotCooldownSec <= 0) return;
+    const timer = window.setInterval(() => {
+      setForgotCooldownSec((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [forgotCooldownSec]);
 
   const applyStatus = (status: AuthStatusSummary) => {
     setAuthStatus(status);
@@ -249,19 +260,33 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (forgotInFlightRef.current || isSubmitting || forgotCooldownSec > 0) {
+      return;
+    }
     clearFeedback();
     if (!isValidEmailAddress(forgotEmail)) {
       setFormError('Please enter a valid registered email address.');
       return;
     }
 
+    forgotInFlightRef.current = true;
     setIsSubmitting(true);
     try {
       const res = await apiBridge.requestPasswordReset(forgotEmail);
-      setFormSuccess(res.message);
+      if (res.status === 'accepted') {
+        setFormSuccess(res.message);
+        setForgotCooldownSec(30);
+      } else {
+        setFormError('Password reset request could not be completed. Please try again.');
+      }
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Unable to submit password reset request.');
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to send password reset email. Please check email service configuration or try again.'
+      );
     } finally {
+      forgotInFlightRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -767,21 +792,35 @@ export const AuthLoginGate: React.FC<AuthLoginGateProps> = ({
                         type="email"
                         autoComplete="email"
                         required
+                        disabled={isSubmitting}
                         value={forgotEmail}
-                        onChange={(e) => setForgotEmail(e.target.value)}
+                        onChange={(e) => {
+                          setForgotEmail(e.target.value);
+                          if (forgotCooldownSec > 0) setForgotCooldownSec(0);
+                        }}
                         placeholder="officer@forestdivision.gov"
-                        className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500"
+                        className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 disabled:opacity-60 focus:outline-hidden focus:border-emerald-500"
                       />
                     </div>
                   </div>
 
                   <button
                     type="submit"
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || forgotCooldownSec > 0}
                     className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold transition flex items-center justify-center gap-2"
                   >
-                    <Mail className="w-4 h-4" />
-                    <span>{isSubmitting ? 'Sending Reset Link...' : 'Send Password Reset Link'}</span>
+                    {isSubmitting ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Mail className="w-4 h-4" />
+                    )}
+                    <span>
+                      {isSubmitting
+                        ? 'Sending Reset Link...'
+                        : forgotCooldownSec > 0
+                          ? `Resend Available in ${forgotCooldownSec}s`
+                          : 'Send Password Reset Link'}
+                    </span>
                   </button>
 
                   <div className="pt-2 border-t border-slate-800 flex justify-center">

@@ -1,15 +1,17 @@
 """SMTP email delivery service for WICPS password recovery.
 
-Supports Gmail SMTP (STARTTLS on port 587 or SSL on port 465) via environment variables.
-Never logs SMTP passwords, reset tokens, or sensitive credentials.
+Supports SMTP with STARTTLS (port 587), implicit SSL (port 465), or local relay servers
+via environment variables. Never logs SMTP passwords, reset tokens, or sensitive credentials.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 import html
 import logging
+import re
 import smtplib
 import ssl
 from urllib.parse import urlencode
@@ -18,12 +20,30 @@ from app.core.config import Settings, get_settings
 
 logger = logging.getLogger("wicps.email")
 
+_EMAIL_REGEX = re.compile(r"^[^@\s\r\n]+@[^@\s\r\n]+\.[^@\s\r\n]+$")
+_LOCAL_RELAY_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
 
 @dataclass(frozen=True)
 class EmailDispatchResult:
     sent: bool
     provider: str
     reason: str | None = None
+    error_code: str | None = None
+
+
+def _is_valid_email(value: str | None) -> bool:
+    cleaned = (value or "").strip()
+    if not cleaned or "\r" in cleaned or "\n" in cleaned:
+        return False
+    return bool(_EMAIL_REGEX.match(cleaned))
+
+
+def _is_gmail_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    return normalized in {"smtp.gmail.com", "smtp.googlemail.com"} or normalized.endswith(
+        (".gmail.com", ".googlemail.com")
+    )
 
 
 def build_password_reset_url(frontend_base_url: str, raw_token: str) -> str:
@@ -39,7 +59,9 @@ def render_password_reset_email(
     expire_minutes: int,
 ) -> tuple[str, str, str]:
     """Returns (subject, plain_text_body, html_body) with WICPS branding."""
-    safe_name = html.escape((display_name or "Forest Department User").strip() or "Forest Department User")
+    safe_name = html.escape(
+        (display_name or "Forest Department User").strip() or "Forest Department User"
+    )
     safe_url = html.escape(reset_url, quote=True)
     subject = "WICPS Password Reset Request"
 
@@ -118,19 +140,183 @@ def render_password_reset_email(
 
 
 class SmtpEmailService:
-    """Sends transactional recovery emails via configured SMTP (Gmail STARTTLS/SSL)."""
+    """Sends transactional recovery emails via configured SMTP (Gmail STARTTLS/SSL or SMTP relay)."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def _effective_password(self) -> str:
+        raw = (self.settings.smtp_password or "").strip()
+        if not raw:
+            return ""
+        # Gmail displays 16-character App Passwords grouped with spaces (e.g. "abcd efgh ijkl mnop").
+        if _is_gmail_host(self.settings.smtp_host):
+            return "".join(raw.split())
+        return raw
+
+    def get_configuration_error(self) -> str | None:
+        """Returns a safe, non-secret diagnostic string when SMTP configuration is incomplete/invalid."""
+        host = (self.settings.smtp_host or "").strip()
+        from_email = (self.settings.smtp_from_email or "").strip()
+        username = (self.settings.smtp_username or "").strip()
+        password = self._effective_password()
+
+        missing: list[str] = []
+        if not host or any(ch.isspace() for ch in host):
+            missing.append("SMTP_HOST")
+        if not _is_valid_email(from_email):
+            missing.append("SMTP_FROM_EMAIL")
+
+        is_local_relay = host.lower() in _LOCAL_RELAY_HOSTS
+        requires_auth = (not is_local_relay) or bool(username) or bool(password)
+        if requires_auth:
+            if not username:
+                missing.append("SMTP_USERNAME")
+            if not password:
+                missing.append("SMTP_PASSWORD")
+
+        if missing:
+            return (
+                f"Incomplete or invalid SMTP configuration ({', '.join(missing)}). "
+                "Set valid SMTP environment variables in .env or backend/.env."
+            )
+        return None
+
     @property
     def is_configured(self) -> bool:
-        return bool(
-            (self.settings.smtp_host or "").strip()
-            and (self.settings.smtp_from_email or "").strip()
-            and (self.settings.smtp_username or "").strip()
-            and (self.settings.smtp_password or "").strip()
+        return self.get_configuration_error() is None
+
+    def _open_authenticated_client(self) -> smtplib.SMTP:
+        host = (self.settings.smtp_host or "").strip()
+        port = int(self.settings.smtp_port)
+        timeout = int(self.settings.smtp_timeout_seconds)
+        username = (self.settings.smtp_username or "").strip()
+        password = self._effective_password()
+        context = ssl.create_default_context()
+
+        if port == 465:
+            server: smtplib.SMTP = smtplib.SMTP_SSL(
+                host,
+                port,
+                timeout=timeout,
+                context=context,
+            )
+            server.ehlo()
+        else:
+            server = smtplib.SMTP(host, port, timeout=timeout)
+            server.ehlo()
+            if self.settings.smtp_use_tls:
+                server.starttls(context=context)
+                server.ehlo()
+
+        if username:
+            server.login(username, password)
+        return server
+
+    def _handle_smtp_exception(self, exc: Exception) -> EmailDispatchResult:
+        host = (self.settings.smtp_host or "").strip()
+        port = int(self.settings.smtp_port)
+
+        if isinstance(exc, smtplib.SMTPAuthenticationError):
+            logger.error(
+                "SMTP authentication failed host=%s port=%s smtp_code=%s. "
+                "Verify SMTP_USERNAME and SMTP_PASSWORD (for Gmail, use a 16-character App Password with 2-Step Verification enabled).",
+                host,
+                port,
+                exc.smtp_code,
+            )
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_error",
+                reason="SMTP authentication failed",
+                error_code="smtp_auth_failed",
+            )
+
+        if isinstance(exc, smtplib.SMTPSenderRefused):
+            logger.error(
+                "SMTP sender rejected host=%s port=%s smtp_code=%s from=%s. "
+                "Verify SMTP_FROM_EMAIL is authorized for the configured SMTP account.",
+                host,
+                port,
+                exc.smtp_code,
+                self.settings.smtp_from_email,
+            )
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_error",
+                reason="SMTP sender address rejected",
+                error_code="smtp_sender_refused",
+            )
+
+        if isinstance(exc, smtplib.SMTPRecipientsRefused):
+            logger.error(
+                "SMTP recipient rejected host=%s port=%s refused_count=%s",
+                host,
+                port,
+                len(exc.recipients or {}),
+            )
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_error",
+                reason="SMTP recipient address rejected",
+                error_code="smtp_recipient_refused",
+            )
+
+        if isinstance(
+            exc,
+            (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, TimeoutError, OSError),
+        ):
+            logger.error(
+                "SMTP connection failed host=%s port=%s tls=%s error_type=%s",
+                host,
+                port,
+                self.settings.smtp_use_tls,
+                type(exc).__name__,
+            )
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_error",
+                reason=f"SMTP connection error ({type(exc).__name__})",
+                error_code="smtp_connection_failed",
+            )
+
+        # Never log SMTP password, reset tokens, or raw exception payloads that could echo secrets
+        logger.error(
+            "SMTP password reset delivery failed host=%s port=%s error_type=%s",
+            host,
+            port,
+            type(exc).__name__,
         )
+        return EmailDispatchResult(
+            sent=False,
+            provider="smtp_error",
+            reason=type(exc).__name__,
+            error_code="smtp_error",
+        )
+
+    def verify_connection(self) -> EmailDispatchResult:
+        """Verifies SMTP server connectivity and authentication without sending an email."""
+        config_error = self.get_configuration_error()
+        if config_error is not None:
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_unconfigured",
+                reason=config_error,
+                error_code="smtp_unconfigured",
+            )
+        try:
+            with self._open_authenticated_client() as server:
+                code, _ = server.noop()
+                if code != 250:
+                    return EmailDispatchResult(
+                        sent=False,
+                        provider="smtp_error",
+                        reason=f"Unexpected SMTP NOOP response code {code}",
+                        error_code="smtp_error",
+                    )
+            return EmailDispatchResult(sent=True, provider="smtp")
+        except Exception as exc:
+            return self._handle_smtp_exception(exc)
 
     def send_password_reset_email(
         self,
@@ -140,75 +326,81 @@ class SmtpEmailService:
         reset_url: str,
         expire_minutes: int,
     ) -> EmailDispatchResult:
+        clean_recipient = (to_email or "").strip()
+        if not _is_valid_email(clean_recipient):
+            logger.warning("Password reset email aborted: invalid recipient address format.")
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_error",
+                reason="Invalid recipient email address",
+                error_code="invalid_recipient",
+            )
+
+        config_error = self.get_configuration_error()
+        if config_error is not None:
+            logger.error(
+                "Password reset email cannot be sent: %s (host=%s, port=%s, from=%s)",
+                config_error,
+                self.settings.smtp_host,
+                self.settings.smtp_port,
+                self.settings.smtp_from_email,
+            )
+            return EmailDispatchResult(
+                sent=False,
+                provider="smtp_unconfigured",
+                reason=config_error,
+                error_code="smtp_unconfigured",
+            )
+
         subject, plain_text, html_body = render_password_reset_email(
             display_name=display_name,
             reset_url=reset_url,
             expire_minutes=expire_minutes,
         )
 
-        if not self.is_configured:
-            logger.warning(
-                "Password reset email skipped: SMTP credentials are not configured (host=%s, from=%s). "
-                "Set SMTP_PASSWORD (Gmail App Password) to enable outbound recovery emails.",
-                self.settings.smtp_host,
-                self.settings.smtp_from_email,
-            )
-            return EmailDispatchResult(
-                sent=False,
-                provider="smtp_unconfigured",
-                reason="SMTP credentials not configured",
-            )
+        from_email = (self.settings.smtp_from_email or "").strip()
+        sender_domain = from_email.split("@", 1)[1] if "@" in from_email else "localhost"
 
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = f"WICPS Security <{self.settings.smtp_from_email}>"
-        msg["To"] = to_email
+        msg["From"] = f"WICPS Security <{from_email}>"
+        msg["To"] = clean_recipient
+        msg["Date"] = formatdate(localtime=True)
+        msg["Message-ID"] = make_msgid(domain=sender_domain)
+        msg["Auto-Submitted"] = "auto-generated"
         msg.set_content(plain_text)
         msg.add_alternative(html_body, subtype="html")
 
         try:
-            context = ssl.create_default_context()
-            if self.settings.smtp_port == 465:
-                with smtplib.SMTP_SSL(
-                    self.settings.smtp_host,
-                    self.settings.smtp_port,
-                    timeout=self.settings.smtp_timeout_seconds,
-                    context=context,
-                ) as server:
-                    server.login(self.settings.smtp_username or "", self.settings.smtp_password or "")
-                    server.send_message(msg)
-            else:
-                with smtplib.SMTP(
-                    self.settings.smtp_host,
-                    self.settings.smtp_port,
-                    timeout=self.settings.smtp_timeout_seconds,
-                ) as server:
-                    server.ehlo()
-                    if self.settings.smtp_use_tls:
-                        server.starttls(context=context)
-                        server.ehlo()
-                    server.login(self.settings.smtp_username or "", self.settings.smtp_password or "")
-                    server.send_message(msg)
+            with self._open_authenticated_client() as server:
+                refused = server.send_message(
+                    msg,
+                    from_addr=from_email,
+                    to_addrs=[clean_recipient],
+                )
+                if refused:
+                    logger.error(
+                        "SMTP server refused password reset recipient host=%s port=%s refused_count=%s",
+                        self.settings.smtp_host,
+                        self.settings.smtp_port,
+                        len(refused),
+                    )
+                    return EmailDispatchResult(
+                        sent=False,
+                        provider="smtp_error",
+                        reason="SMTP server refused recipient",
+                        error_code="smtp_recipient_refused",
+                    )
 
             logger.info(
-                "Password reset email dispatched via SMTP host=%s port=%s",
+                "Password reset email accepted by SMTP server host=%s port=%s from=%s",
                 self.settings.smtp_host,
                 self.settings.smtp_port,
+                from_email,
             )
             return EmailDispatchResult(sent=True, provider="smtp")
         except Exception as exc:
-            # Never log SMTP password, recipient token, or raw exception payloads that could echo secrets
-            logger.error(
-                "SMTP password reset delivery failed host=%s port=%s error_type=%s",
-                self.settings.smtp_host,
-                self.settings.smtp_port,
-                type(exc).__name__,
-            )
-            return EmailDispatchResult(
-                sent=False,
-                provider="smtp_error",
-                reason=type(exc).__name__,
-            )
+            return self._handle_smtp_exception(exc)
 
 
 def get_email_service(settings: Settings | None = None) -> SmtpEmailService:

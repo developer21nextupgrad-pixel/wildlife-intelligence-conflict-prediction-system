@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
+from email import policy
+from email.parser import BytesParser
 import hashlib
 import io
 import logging
 from pathlib import Path
+import re
+import socket
+import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import uuid
@@ -50,6 +56,9 @@ class RecordingEmailService(SmtpEmailService):
     def __init__(self, settings):
         super().__init__(settings)
         self.sent: list[dict[str, Any]] = []
+
+    def get_configuration_error(self) -> str | None:
+        return None
 
     def send_password_reset_email(
         self,
@@ -494,6 +503,365 @@ def test_password_reset_rate_limiting_enforced(db_session: Session) -> None:
         assert r1.status_code == 200
         assert r2.status_code == 200
         assert r3.status_code == 429
+
+
+class _LocalTestSmtpServer:
+    """Minimal real TCP SMTP server supporting EHLO, AUTH PLAIN/LOGIN, MAIL, RCPT, DATA, NOOP, QUIT."""
+
+    def __init__(self, *, expected_username: str, expected_password: str) -> None:
+        self.expected_username = expected_username
+        self.expected_password = expected_password
+        self.messages: list[dict[str, Any]] = []
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(5)
+        self._sock.settimeout(0.5)
+        self.host, self.port = self._sock.getsockname()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def __enter__(self) -> "_LocalTestSmtpServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2)
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                self._handle_client(conn)
+
+    def _handle_client(self, conn: socket.socket) -> None:
+        conn.settimeout(3.0)
+        reader = conn.makefile("rb")
+        writer = conn.makefile("wb")
+
+        def send_line(line: str) -> None:
+            writer.write((line + "\r\n").encode("utf-8"))
+            writer.flush()
+
+        send_line("220 localhost ESMTP WICPS-Test")
+        mail_from = ""
+        rcpt_to: list[str] = []
+
+        while True:
+            raw = reader.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            upper = line.upper()
+            if upper.startswith("EHLO") or upper.startswith("HELO"):
+                send_line("250-localhost")
+                send_line("250-AUTH PLAIN LOGIN")
+                send_line("250 OK")
+            elif upper.startswith("AUTH PLAIN"):
+                parts = line.split(" ", 2)
+                if len(parts) == 3 and parts[2].strip():
+                    token_b64 = parts[2].strip()
+                else:
+                    send_line("334 ")
+                    token_b64 = reader.readline().decode("utf-8", errors="replace").strip()
+                decoded = base64.b64decode(token_b64).decode("utf-8", errors="replace").split("\x00")
+                user = decoded[-2] if len(decoded) >= 2 else ""
+                pwd = decoded[-1] if len(decoded) >= 1 else ""
+                if user == self.expected_username and pwd == self.expected_password:
+                    send_line("235 2.7.0 Authentication successful")
+                else:
+                    send_line("535 5.7.8 Username and Password not accepted")
+            elif upper.startswith("AUTH LOGIN"):
+                send_line("334 VXNlcm5hbWU6")
+                user = base64.b64decode(reader.readline().strip()).decode("utf-8", errors="replace")
+                send_line("334 UGFzc3dvcmQ6")
+                pwd = base64.b64decode(reader.readline().strip()).decode("utf-8", errors="replace")
+                if user == self.expected_username and pwd == self.expected_password:
+                    send_line("235 2.7.0 Authentication successful")
+                else:
+                    send_line("535 5.7.8 Username and Password not accepted")
+            elif upper.startswith("MAIL FROM:"):
+                mail_from = line[10:].strip().strip("<>")
+                rcpt_to = []
+                send_line("250 OK")
+            elif upper.startswith("RCPT TO:"):
+                rcpt_to.append(line[8:].strip().strip("<>"))
+                send_line("250 OK")
+            elif upper == "DATA":
+                send_line("354 End data with <CR><LF>.<CR><LF>")
+                data_lines: list[bytes] = []
+                while True:
+                    dline = reader.readline()
+                    if not dline or dline in (b".\r\n", b".\n"):
+                        break
+                    if dline.startswith(b".."):
+                        dline = dline[1:]
+                    data_lines.append(dline)
+                self.messages.append(
+                    {
+                        "mail_from": mail_from,
+                        "rcpt_to": list(rcpt_to),
+                        "raw_bytes": b"".join(data_lines),
+                    }
+                )
+                send_line("250 2.0.0 OK queued")
+            elif upper == "NOOP":
+                send_line("250 OK")
+            elif upper == "RSET":
+                mail_from = ""
+                rcpt_to = []
+                send_line("250 OK")
+            elif upper == "QUIT":
+                send_line("221 Bye")
+                break
+            else:
+                send_line("500 Unrecognized command")
+
+
+def test_forgot_password_rejects_with_503_when_smtp_unconfigured_without_enumerating(
+    db_session: Session,
+) -> None:
+    settings = make_test_settings(
+        smtp_host="smtp.gmail.com",
+        smtp_port=587,
+        smtp_username="developer21.nextupgrad@gmail.com",
+        smtp_password=None,  # Missing SMTP password
+        smtp_from_email="developer21.nextupgrad@gmail.com",
+    )
+    app = create_application(settings)
+    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[auth_routes._get_email_service_dep] = lambda: SmtpEmailService(settings)
+
+    user = UserAccount(
+        email="registered.ranger@forest.gov.in",
+        username="registered.ranger",
+        display_name="Registered Ranger",
+        role="operator",
+        password_hash=hash_password("RangerPass#123"),
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+
+    with TestClient(app) as tc:
+        reg_resp = tc.post(
+            "/api/v1/auth/forgot-password",
+            json={"email": "registered.ranger@forest.gov.in"},
+        )
+        unreg_resp = tc.post(
+            "/api/v1/auth/forgot-password",
+            json={"email": "nonexistent@forest.gov.in"},
+        )
+
+    assert reg_resp.status_code == 503
+    assert unreg_resp.status_code == 503
+    # Identical error response prevents account enumeration
+    assert reg_resp.json()["detail"] == unreg_resp.json()["detail"]
+    # No orphan reset token should be persisted when email delivery is unconfigured
+    tokens = db_session.execute(select(PasswordResetToken)).scalars().all()
+    assert len(tokens) == 0
+
+
+def test_real_smtp_end_to_end_password_reset_and_login(db_session: Session) -> None:
+    expected_user = "developer21.nextupgrad@gmail.com"
+    expected_pass = "test-smtp-app-password-16ch"
+
+    with _LocalTestSmtpServer(
+        expected_username=expected_user,
+        expected_password=expected_pass,
+    ) as smtp_server:
+        settings = make_test_settings(
+            smtp_host=smtp_server.host,
+            smtp_port=smtp_server.port,
+            smtp_username=expected_user,
+            smtp_password=expected_pass,
+            smtp_from_email=expected_user,
+            smtp_use_tls=False,
+            frontend_url="https://wicps.forest.gov.in",
+            password_reset_token_expire_minutes=20,
+        )
+        email_service = SmtpEmailService(settings)
+        assert email_service.is_configured is True
+        assert email_service.verify_connection().sent is True
+
+        app = create_application(settings)
+        app.dependency_overrides[get_db] = lambda: db_session
+        app.dependency_overrides[auth_routes._get_email_service_dep] = lambda: email_service
+
+        user = UserAccount(
+            email="field.officer@forest.gov.in",
+            username="field.officer",
+            display_name="Field Officer",
+            role="operator",
+            password_hash=hash_password("OldPassword#123"),
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.commit()
+
+        with TestClient(app) as tc:
+            # 1. Unregistered email returns generic 200 and sends 0 emails
+            unreg_resp = tc.post(
+                "/api/v1/auth/forgot-password",
+                json={"email": "nobody@forest.gov.in"},
+            )
+            assert unreg_resp.status_code == 200
+            assert len(smtp_server.messages) == 0
+
+            # 2. Registered email sends real RFC-5322 email via TCP SMTP server
+            reg_resp = tc.post(
+                "/api/v1/auth/forgot-password",
+                json={"email": "field.officer@forest.gov.in"},
+            )
+            assert reg_resp.status_code == 200
+            assert reg_resp.json()["message"] == unreg_resp.json()["message"]
+            assert len(smtp_server.messages) == 1
+
+            captured = smtp_server.messages[0]
+            assert captured["mail_from"] == expected_user
+            assert captured["rcpt_to"] == ["field.officer@forest.gov.in"]
+
+            parsed_msg = BytesParser(policy=policy.default).parsebytes(captured["raw_bytes"])
+            assert parsed_msg["Subject"] == "WICPS Password Reset Request"
+            assert expected_user in parsed_msg["From"]
+            assert parsed_msg["To"] == "field.officer@forest.gov.in"
+
+            text_part = parsed_msg.get_body(preferencelist=("plain",))
+            html_part = parsed_msg.get_body(preferencelist=("html",))
+            assert text_part is not None and html_part is not None
+
+            text_content = text_part.get_content()
+            match = re.search(r"https://wicps\.forest\.gov\.in/reset-password\?token=([^\s]+)", text_content)
+            assert match is not None, f"Reset URL not found in email text body: {text_content}"
+            raw_token = match.group(1)
+
+            # 3. Verify token is hashed in DB
+            token_row = db_session.execute(
+                select(PasswordResetToken).where(PasswordResetToken.user_id == user.id)
+            ).scalar_one()
+            assert token_row.token_hash == hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            assert token_row.used_at is None
+
+            # 4. Validate token -> reset password -> login with new password
+            val_resp = tc.post("/api/v1/auth/reset-password/validate", json={"token": raw_token})
+            assert val_resp.status_code == 200 and val_resp.json()["valid"] is True
+
+            reset_resp = tc.post(
+                "/api/v1/auth/reset-password",
+                json={
+                    "token": raw_token,
+                    "new_password": "BrandNewPassword#456",
+                    "confirm_password": "BrandNewPassword#456",
+                },
+            )
+            assert reset_resp.status_code == 200
+
+            assert (
+                tc.post(
+                    "/api/v1/auth/login",
+                    json={"identifier": "field.officer@forest.gov.in", "password": "OldPassword#123"},
+                ).status_code
+                == 401
+            )
+            assert (
+                tc.post(
+                    "/api/v1/auth/login",
+                    json={"identifier": "field.officer@forest.gov.in", "password": "BrandNewPassword#456"},
+                ).status_code
+                == 200
+            )
+
+            # 5. Replay of already-used token is rejected
+            replay_resp = tc.post(
+                "/api/v1/auth/reset-password",
+                json={
+                    "token": raw_token,
+                    "new_password": "ThirdPassword#789",
+                    "confirm_password": "ThirdPassword#789",
+                },
+            )
+            assert replay_resp.status_code == 400
+
+
+def test_smtp_auth_failure_returns_503_invalidates_token_and_redacts_secrets(
+    db_session: Session,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wrong_secret = "wrong-gmail-secret-must-never-leak-999"
+
+    with _LocalTestSmtpServer(
+        expected_username="developer21.nextupgrad@gmail.com",
+        expected_password="correct-password-only",
+    ) as smtp_server:
+        settings = make_test_settings(
+            smtp_host=smtp_server.host,
+            smtp_port=smtp_server.port,
+            smtp_username="developer21.nextupgrad@gmail.com",
+            smtp_password=wrong_secret,
+            smtp_from_email="developer21.nextupgrad@gmail.com",
+            smtp_use_tls=False,
+        )
+        email_service = SmtpEmailService(settings)
+        verify_res = email_service.verify_connection()
+        assert verify_res.sent is False
+        assert verify_res.error_code == "smtp_auth_failed"
+
+        app = create_application(settings)
+        app.dependency_overrides[get_db] = lambda: db_session
+        app.dependency_overrides[auth_routes._get_email_service_dep] = lambda: email_service
+
+        user = UserAccount(
+            email="authfail.officer@forest.gov.in",
+            username="authfail.officer",
+            display_name="Auth Fail Officer",
+            role="operator",
+            password_hash=hash_password("InitialSecret#123"),
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.commit()
+
+        with caplog.at_level(logging.WARNING):
+            with TestClient(app) as tc:
+                resp = tc.post(
+                    "/api/v1/auth/forgot-password",
+                    json={"email": "authfail.officer@forest.gov.in"},
+                )
+
+        assert resp.status_code == 503
+        assert len(smtp_server.messages) == 0
+
+        # Undelivered token must be immediately invalidated (used_at set)
+        token_row = db_session.execute(
+            select(PasswordResetToken).where(PasswordResetToken.user_id == user.id)
+        ).scalar_one()
+        assert token_row.used_at is not None
+
+        combined_logs = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert wrong_secret not in combined_logs
+
+
+def test_gmail_app_password_spaces_normalized() -> None:
+    settings = make_test_settings(
+        smtp_host="smtp.gmail.com",
+        smtp_port=587,
+        smtp_username="developer21.nextupgrad@gmail.com",
+        smtp_password="abcd efgh ijkl mnop",
+        smtp_from_email="developer21.nextupgrad@gmail.com",
+    )
+    service = SmtpEmailService(settings)
+    assert service.is_configured is True
+    assert service._effective_password() == "abcdefghijklmnop"
 
 
 # ---------------------------------------------------------------------------

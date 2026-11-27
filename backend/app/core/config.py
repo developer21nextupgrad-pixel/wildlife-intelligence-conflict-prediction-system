@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     smtp_from_email: str = "developer21.nextupgrad@gmail.com"
     smtp_use_tls: bool = True
     smtp_timeout_seconds: int = 15
+    frontend_url: str | None = None
     frontend_base_url: str = "http://localhost:3000"
 
     auto_seed_demo_data: bool = False
@@ -175,6 +176,7 @@ class Settings(BaseSettings):
         "rate_limit_redis_url",
         "smtp_username",
         "smtp_password",
+        "frontend_url",
         mode="before",
     )
     @classmethod
@@ -190,8 +192,12 @@ class Settings(BaseSettings):
     def apply_defaults(self) -> "Settings":
         if self.s3_endpoint_url:
             self.s3_endpoint_url = self.s3_endpoint_url.rstrip("/") or None
+        if self.frontend_url:
+            self.frontend_url = self.frontend_url.strip().rstrip("/") or None
         if self.frontend_base_url:
             self.frontend_base_url = self.frontend_base_url.strip().rstrip("/") or "http://localhost:3000"
+        self.smtp_host = (_clean_optional_str(self.smtp_host) or "smtp.gmail.com")
+        self.smtp_from_email = (_clean_optional_str(self.smtp_from_email) or "")
         endpoint = (self.s3_endpoint_url or "").lower()
         is_tigris_or_r2 = any(
             domain in endpoint
@@ -264,6 +270,11 @@ class Settings(BaseSettings):
         if origins:
             return origins
         return [] if self.is_production else ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    @property
+    def effective_frontend_url(self) -> str:
+        raw = self.frontend_url or self.frontend_base_url or "http://localhost:3000"
+        return raw.strip().rstrip("/") or "http://localhost:3000"
 
     @property
     def rtsp_allowed_hosts_set(self) -> set[str]:
